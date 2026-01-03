@@ -42,79 +42,85 @@ SwiftBeaverLodge/
 
 ## 2. SwiftBeaver Integration Notes
 
-### API Status: ✅ LIBRARY API AVAILABLE
+### Integration Method: Binary Subprocess
 
-SwiftBeaver exposes a **full library API** via the `fastcarve` crate:
+SwiftBeaverLodge uses the **pre-built fastcarve binary** from [GitHub releases](https://github.com/gaestu/SwiftBeaver/releases) rather than the crate API. This provides:
 
-```rust
-// Key public modules from fastcarve crate:
-pub mod carve;       // CarvedFile, CarveRegistry, extraction
-pub mod config;      // Config, LoadedConfig, load_config()
-pub mod pipeline;    // run_pipeline(), run_pipeline_with_cancel()
-pub mod metadata;    // MetadataSink, RunSummary
-pub mod scanner;     // SignatureScanner, build_signature_scanner()
-pub mod strings;     // StringScanner, StringArtefact
-pub mod evidence;    // EvidenceSource, open_source()
-pub mod checkpoint;  // CheckpointState, save/load checkpoint
+- **Stable releases** - Pinned to tested versions (v0.2.1)
+- **Faster builds** - No need to compile fastcarve from source
+- **Simpler dependencies** - No libewf/GPU SDK required at build time
+- **Cross-platform** - Pre-built binaries per platform
+
+### Binary Location
+
+```
+src-tauri/
+├── bin/
+│   └── fastcarve          # Downloaded binary (dev/bundled)
+└── download-fastcarve.sh  # Script to download binary
 ```
 
 ### Key Integration Points
 
-1. **Progress Reporting** - Implement `pipeline::ProgressReporter` trait:
+1. **Subprocess Execution** - Spawn fastcarve with CLI arguments:
    ```rust
-   pub trait ProgressReporter: Send + Sync {
-       fn on_progress(&self, snapshot: &ProgressSnapshot);
+   Command::new(&binary_path)
+       .args(&[
+           "--input", &config.input_path,
+           "--output", &config.output_path,
+           "--log-format", "json",
+           "--progress-interval-secs", "1",
+           "--metadata-backend", "parquet",
+       ])
+       .stdout(Stdio::piped())
+       .stderr(Stdio::piped())
+       .spawn()
+   ```
+
+2. **Progress Parsing** - Parse JSON log output from stdout:
+   ```rust
+   // fastcarve with --log-format json emits:
+   // {"timestamp":"...","level":"INFO","message":"progress bytes_scanned=1234 ..."}
+   
+   fn parse_json_log(line: &str) -> Option<(String, Value)> {
+       // Extract level, message, and progress fields
    }
    ```
 
-2. **Pipeline Execution** - Use `run_pipeline_with_cancel()` for GUI control:
+3. **Cancellation** - Send SIGTERM to the subprocess:
    ```rust
-   pipeline::run_pipeline_with_cancel(
-       &cfg,
-       evidence_source,
-       sig_scanner,
-       string_scanner,
-       meta_sink,
-       &run_output_dir,
-       workers,
-       chunk_size,
-       overlap,
-       max_bytes,
-       max_chunks,
-       carve_registry,
-       cancel_flag,       // Arc<AtomicBool> for cancellation
-       progress_config,   // Optional progress callback
-       checkpoint_config, // Optional checkpointing
-   )
+   #[cfg(unix)]
+   unsafe { libc::kill(pid as i32, libc::SIGTERM); }
    ```
 
-3. **Event Types** - `pipeline::events::MetadataEvent` enum:
-   - `File(CarvedFile)` - carved file notification
-   - `String(StringArtefact)` - URL/email/phone found
-   - `History(BrowserHistoryRecord)` - browser history
-   - `Cookie(BrowserCookieRecord)` - browser cookies
-   - `Download(BrowserDownloadRecord)` - browser downloads
-   - `RunSummary(RunSummary)` - final statistics
-   - `Entropy(EntropyRegion)` - high entropy region
-
-4. **ProgressSnapshot Fields**:
+4. **Metadata Reading** - Auto-detect Parquet (default) or JSONL:
    ```rust
-   pub struct ProgressSnapshot {
-       pub bytes_scanned: u64,
-       pub total_bytes: u64,
-       pub chunks_processed: u64,
-       pub hits_found: u64,
-       pub files_carved: u64,
-       pub string_spans: u64,
-       pub artefacts_extracted: u64,
-       pub carve_errors: u64,
-       pub metadata_errors: u64,
-       pub sqlite_errors: u64,
-       pub elapsed_seconds: f64,
-       pub throughput_mib: f64,
-       pub eta_seconds: Option<u64>,
+   fn detect_metadata_backend(run_path: &Path) -> &'static str {
+       if run_path.join("parquet").exists() { "parquet" }
+       else if run_path.join("metadata/carved_files.jsonl").exists() { "jsonl" }
+       else { "unknown" }
    }
    ```
+
+### CLI Arguments Reference
+
+| Option | Description |
+|--------|-------------|
+| `--input <path>` | Evidence file/device path |
+| `--output <path>` | Output directory |
+| `--log-format json` | Machine-readable JSON logs |
+| `--progress-interval-secs N` | Progress updates every N seconds |
+| `--metadata-backend parquet` | Output format (parquet/jsonl/csv) |
+| `--types jpeg,png,sqlite` | File types to carve |
+| `--scan-strings` | Enable string/URL/email scanning |
+| `--gpu` | Enable GPU acceleration |
+| `--compute-evidence-sha256` | Compute evidence hash |
+
+### ProgressSnapshot Fields (from JSON logs)
+
+```
+progress bytes_scanned=N total_bytes=N pct=N.N hits=N files=N rate_mib=N.NN eta_secs=Some(N)
+```
 
 ---
 
@@ -529,26 +535,58 @@ chore(deps): update tauri to 2.1.0
 
 ---
 
-## 12. Quick Reference: SwiftBeaver Crate Usage
+## 12. Quick Reference: Binary Integration
+
+### Download Binary
+
+```bash
+cd src-tauri
+./download-fastcarve.sh  # Downloads v0.2.1 to bin/fastcarve
+```
+
+### Spawn Subprocess
 
 ```rust
-use fastcarve::{
-    config::{Config, load_config, LoadedConfig},
-    pipeline::{
-        run_pipeline_with_cancel,
-        ProgressReporter, ProgressSnapshot, ProgressConfig,
-        CheckpointConfig,
-    },
-    evidence::{EvidenceSource, open_source},
-    scanner::{SignatureScanner, build_signature_scanner},
-    strings::{StringScanner, build_string_scanner},
-    metadata::{MetadataSink, MetadataBackendKind, build_sink},
-    carve::{CarvedFile, CarveRegistry},
-    checkpoint::{CheckpointState, load_checkpoint, save_checkpoint},
-};
+use std::process::{Command, Stdio};
 
-// The dependency in Cargo.toml:
-// fastcarve = { git = "https://github.com/gaestu/SwiftBeaver", branch = "main" }
+let mut child = Command::new("bin/fastcarve")
+    .args(&[
+        "--input", &input_path,
+        "--output", &output_path,
+        "--log-format", "json",
+        "--progress-interval-secs", "1",
+        "--metadata-backend", "parquet",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()?;
+```
+
+### Parse Progress
+
+```rust
+// JSON log line: {"timestamp":"...","level":"INFO","message":"progress bytes_scanned=..."}
+fn parse_progress_message(message: &str) -> Option<GuiScanProgress> {
+    let parts: HashMap<&str, &str> = message
+        .strip_prefix("progress ")?
+        .split_whitespace()
+        .filter_map(|p| { let mut s = p.splitn(2, '='); Some((s.next()?, s.next()?)) })
+        .collect();
+    // Extract bytes_scanned, total_bytes, hits, files, rate_mib, eta_secs
+}
+```
+
+### Read Parquet Results
+
+```rust
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+let file = File::open("output/run_id/parquet/files_jpeg.parquet")?;
+let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+
+for batch in reader {
+    // Process Arrow RecordBatch
+}
 ```
 
 ---

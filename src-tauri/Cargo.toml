@@ -1,0 +1,61 @@
+[package]
+name = "swiftbeaverlodge"
+version = "0.1.0"
+description = "GUI Frontend for SwiftBeaver Forensic File Carver"
+authors = ["SwiftBeaverLodge Team"]
+edition = "2021"
+
+[lib]
+name = "swiftbeaverlodge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-os = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Async runtime
+tokio = { version = "1", features = ["full", "process"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# Image processing (thumbnails)
+image = "0.25"
+base64 = "0.22"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# System info
+sysinfo = "0.30"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Random ID generation
+rand = "0.8"
+
+# Parquet reading for metadata
+parquet = { version = "54", default-features = false, features = ["arrow"] }
+arrow = { version = "54", default-features = false }
+
+# Binary path detection
+which = "7"
+
+# Unix process signals
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

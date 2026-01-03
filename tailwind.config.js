@@ -1,0 +1,27 @@
+import forms from '@tailwindcss/forms';
+
+/** @type {import('tailwindcss').Config} */
+export default {
+  darkMode: 'class',
+  content: [
+    './src/**/*.{html,js,svelte,ts}',
+  ],
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+      },
+      colors: {
+        // Custom forensics-focused color scheme
+        slate: {
+          850: '#172033',
+          950: '#0b1120',
+        },
+      },
+    },
+  },
+  plugins: [
+    forms,
+  ],
+};

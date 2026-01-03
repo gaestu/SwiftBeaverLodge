@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SwiftBeaverLodge",
+  "version": "0.1.0",
+  "identifier": "com.swiftbeaver.lodge",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "SwiftBeaverLodge - Forensic File Carver",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 768,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "bin/fastcarve": "bin/fastcarve"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "GUI for SwiftBeaver forensic file carver",
+    "longDescription": "SwiftBeaverLodge is a graphical user interface for the SwiftBeaver forensic file carver. It enables recovery of deleted files, extraction of strings/URLs/emails, and analysis of disk images for digital forensics."
+  }
+}
