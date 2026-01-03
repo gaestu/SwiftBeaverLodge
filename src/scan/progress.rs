@@ -65,16 +65,23 @@ pub fn format_bytes(bytes: u64) -> String {
 
 /// Parse a JSON log line from fastcarve
 ///
-/// Format: {"timestamp":"...","level":"INFO","message":"...","fields":{...}}
+/// Format: {"timestamp":"...","level":"INFO","fields":{"message":"..."},"target":"..."}
 ///
 /// Returns (event_type, payload) where:
 /// - For progress: ("progress", progress_data)
+/// - For starting: ("starting", {"run_id": "...", "output": "..."})
 /// - For logs: (level, {"message": "..."})
 pub fn parse_json_log(line: &str) -> Option<(String, Value)> {
     let json: Value = serde_json::from_str(line).ok()?;
     
     let level = json.get("level")?.as_str()?;
-    let message = json.get("message")?.as_str()?;
+    
+    // fastcarve uses "fields.message" format
+    let message = json.get("fields")
+        .and_then(|f| f.get("message"))
+        .and_then(|m| m.as_str())
+        // Fallback to top-level message for compatibility
+        .or_else(|| json.get("message").and_then(|m| m.as_str()))?;
     
     // Check if this is a progress message
     if message.starts_with("progress ") {
@@ -83,11 +90,45 @@ pub fn parse_json_log(line: &str) -> Option<(String, Value)> {
         }
     }
     
+    // Check if this is a starting message (contains run output path)
+    if message.starts_with("starting ") {
+        if let Some(start_info) = parse_starting_message(message) {
+            return Some(("starting".to_string(), start_info));
+        }
+    }
+    
     // Return as log entry
     let mut payload = serde_json::Map::new();
     payload.insert("message".to_string(), Value::String(message.to_string()));
     
     Some((level.to_lowercase(), Value::Object(payload)))
+}
+
+/// Parse a starting message to extract run_id and output path
+///
+/// Format: "starting run_id=XXX input=YYY output=ZZZ workers=N chunk_size=N"
+pub fn parse_starting_message(message: &str) -> Option<Value> {
+    let message = message.strip_prefix("starting ")?;
+    
+    let mut run_id = String::new();
+    let mut output = String::new();
+    
+    for part in message.split_whitespace() {
+        if let Some(val) = part.strip_prefix("run_id=") {
+            run_id = val.to_string();
+        } else if let Some(val) = part.strip_prefix("output=") {
+            output = val.to_string();
+        }
+    }
+    
+    if !output.is_empty() {
+        let mut payload = serde_json::Map::new();
+        payload.insert("run_id".to_string(), Value::String(run_id));
+        payload.insert("output".to_string(), Value::String(output));
+        return Some(Value::Object(payload));
+    }
+    
+    None
 }
 
 /// Parse a progress message string
@@ -175,6 +216,18 @@ mod tests {
 
     #[test]
     fn test_parse_json_log_progress() {
+        // Test with fields.message format (fastcarve's actual format)
+        let line = r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","fields":{"message":"progress bytes_scanned=1000 total_bytes=10000 pct=10.0 hits=0 files=0 rate_mib=100.0 eta_secs=Some(90)"}}"#;
+        
+        let (event_type, payload) = parse_json_log(line).unwrap();
+        
+        assert_eq!(event_type, "progress");
+        assert_eq!(payload.get("bytes_scanned").unwrap().as_u64(), Some(1000));
+    }
+
+    #[test]
+    fn test_parse_json_log_progress_legacy_format() {
+        // Test fallback to root-level message for compatibility
         let line = r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"progress bytes_scanned=1000 total_bytes=10000 pct=10.0 hits=0 files=0 rate_mib=100.0 eta_secs=Some(90)"}"#;
         
         let (event_type, payload) = parse_json_log(line).unwrap();
@@ -185,12 +238,33 @@ mod tests {
 
     #[test]
     fn test_parse_json_log_regular() {
-        let line = r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"Starting scan"}"#;
+        let line = r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","fields":{"message":"Starting scan"}}"#;
         
         let (event_type, payload) = parse_json_log(line).unwrap();
         
         assert_eq!(event_type, "info");
         assert_eq!(payload.get("message").unwrap().as_str(), Some("Starting scan"));
+    }
+
+    #[test]
+    fn test_parse_json_log_starting() {
+        let line = r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","fields":{"message":"starting run_id=20260103T125116Z_09ab31c2 input=/tmp/test.dd output=/tmp/out/20260103T125116Z_09ab31c2 workers=4 chunk_size=1048576"}}"#;
+        
+        let (event_type, payload) = parse_json_log(line).unwrap();
+        
+        assert_eq!(event_type, "starting");
+        assert_eq!(payload.get("run_id").unwrap().as_str(), Some("20260103T125116Z_09ab31c2"));
+        assert_eq!(payload.get("output").unwrap().as_str(), Some("/tmp/out/20260103T125116Z_09ab31c2"));
+    }
+
+    #[test]
+    fn test_parse_starting_message() {
+        let msg = "starting run_id=20260103T125116Z_09ab31c2 input=/tmp/test.dd output=/tmp/out/20260103T125116Z_09ab31c2 workers=4";
+        
+        let payload = parse_starting_message(msg).unwrap();
+        
+        assert_eq!(payload.get("run_id").unwrap().as_str(), Some("20260103T125116Z_09ab31c2"));
+        assert_eq!(payload.get("output").unwrap().as_str(), Some("/tmp/out/20260103T125116Z_09ab31c2"));
     }
 
     #[test]

@@ -18,6 +18,8 @@ pub enum ScanMessage {
     Log(LogEntry),
     StateChange(ScanState),
     Error(String),
+    /// Run output path from fastcarve's "starting" log
+    RunOutputPath { run_id: String, output_path: String },
 }
 
 /// Manages scan lifecycle
@@ -96,6 +98,11 @@ impl ScanManager {
                     ScanMessage::Error(e) => {
                         self.error = Some(e);
                     }
+                    ScanMessage::RunOutputPath { run_id, output_path } => {
+                        // Update to the actual path from fastcarve
+                        self.run_id = Some(run_id);
+                        self.run_output_path = Some(output_path);
+                    }
                 }
             }
             cleanup
@@ -128,18 +135,14 @@ impl ScanManager {
         std::fs::create_dir_all(&config.output_path)
             .context("Failed to create output directory")?;
 
-        // Generate run ID
-        let run_id = generate_run_id();
-        let run_output_path = PathBuf::from(&config.output_path).join(&run_id);
-        
         // Create channels
         let (message_tx, message_rx) = channel::<ScanMessage>();
         let (cancel_tx, cancel_rx) = channel::<()>();
 
-        // Reset state
+        // Reset state (run_id and run_output_path will be set from fastcarve's "starting" log)
         self.state = ScanState::Running;
-        self.run_id = Some(run_id.clone());
-        self.run_output_path = Some(run_output_path.display().to_string());
+        self.run_id = None;
+        self.run_output_path = None;
         self.progress = None;
         self.logs.clear();
         self.error = None;
@@ -154,7 +157,7 @@ impl ScanManager {
         self.logs.push(LogEntry {
             timestamp: Utc::now().to_rfc3339(),
             level: "INFO".to_string(),
-            message: format!("Starting scan: {}", run_id),
+            message: format!("Starting scan on: {}", config.input_path),
         });
 
         // Spawn scan thread (non-blocking!)
@@ -276,6 +279,28 @@ fn run_scan_thread(
                 if let Ok(prog) = serde_json::from_value::<ScanProgress>(payload) {
                     let _ = message_tx.send(ScanMessage::Progress(prog));
                 }
+            } else if event_type == "starting" {
+                // Extract run_id and output path from starting message
+                let run_id = payload.get("run_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let output_path = payload.get("output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                if !output_path.is_empty() {
+                    let _ = message_tx.send(ScanMessage::RunOutputPath {
+                        run_id: run_id.clone(),
+                        output_path: output_path.clone(),
+                    });
+                    let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                        timestamp: Utc::now().to_rfc3339(),
+                        level: "INFO".to_string(),
+                        message: format!("Run ID: {} → Output: {}", run_id, output_path),
+                    }));
+                }
             } else {
                 // It's a log entry
                 let msg = payload.get("message")
@@ -344,6 +369,7 @@ fn run_scan_thread(
 }
 
 /// Generate a unique run ID
+#[allow(dead_code)]
 fn generate_run_id() -> String {
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
     let random: u32 = rand::random::<u32>() % 0xFFFFFF;
@@ -428,7 +454,6 @@ fn build_cli_args(config: &ScanConfig) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::MetadataBackend;
 
     #[test]
     fn test_generate_run_id() {

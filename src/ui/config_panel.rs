@@ -157,7 +157,13 @@ impl ConfigPanel {
             // Advanced options
             ui.collapsing("Advanced Options", |ui| {
                 ui.checkbox(&mut config.compute_evidence_hash, "Compute evidence SHA-256");
-                ui.checkbox(&mut config.gpu_enabled, "Enable GPU acceleration");
+                
+                // GPU not available in pre-built binary - show disabled checkbox with tooltip
+                ui.add_enabled_ui(false, |ui| {
+                    ui.checkbox(&mut config.gpu_enabled, "Enable GPU acceleration")
+                        .on_disabled_hover_text("GPU acceleration not available in pre-built binary");
+                });
+                
                 ui.checkbox(&mut config.disable_zip, "Disable ZIP archive scanning");
                 
                 ui.add_space(10.0);
