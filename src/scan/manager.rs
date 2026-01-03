@@ -2,8 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::io::{BufRead, BufReader};
 
 use anyhow::{bail, Context, Result};
@@ -12,6 +11,15 @@ use chrono::Utc;
 use crate::config::ScanConfig;
 use super::{ScanState, ScanProgress, LogEntry, find_fastcarve_binary, progress::parse_json_log};
 
+/// Messages from scan thread to UI
+#[derive(Debug, Clone)]
+pub enum ScanMessage {
+    Progress(ScanProgress),
+    Log(LogEntry),
+    StateChange(ScanState),
+    Error(String),
+}
+
 /// Manages scan lifecycle
 pub struct ScanManager {
     state: ScanState,
@@ -19,9 +27,13 @@ pub struct ScanManager {
     run_output_path: Option<String>,
     progress: Option<ScanProgress>,
     logs: Vec<LogEntry>,
-    cancel_flag: Arc<AtomicBool>,
-    child_pid: Option<u32>,
     error: Option<String>,
+    
+    /// Channel to receive messages from scan thread
+    message_rx: Option<Receiver<ScanMessage>>,
+    
+    /// Sender to request cancellation
+    cancel_tx: Option<Sender<()>>,
 }
 
 impl ScanManager {
@@ -32,9 +44,9 @@ impl ScanManager {
             run_output_path: None,
             progress: None,
             logs: Vec::new(),
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-            child_pid: None,
             error: None,
+            message_rx: None,
+            cancel_tx: None,
         }
     }
 
@@ -54,8 +66,51 @@ impl ScanManager {
         self.run_output_path.as_deref()
     }
 
-    /// Start a scan
-    pub async fn start(&mut self, config: ScanConfig) -> Result<()> {
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Poll for updates from the scan thread (call from UI update loop)
+    pub fn poll(&mut self) {
+        // Check if we have a receiver
+        let should_cleanup = if let Some(rx) = &self.message_rx {
+            let mut cleanup = false;
+            
+            // Drain all pending messages (non-blocking)
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    ScanMessage::Progress(p) => {
+                        self.progress = Some(p);
+                    }
+                    ScanMessage::Log(log) => {
+                        self.logs.push(log);
+                    }
+                    ScanMessage::StateChange(new_state) => {
+                        self.state = new_state;
+                        if new_state != ScanState::Running {
+                            // Mark for cleanup after loop
+                            cleanup = true;
+                        }
+                    }
+                    ScanMessage::Error(e) => {
+                        self.error = Some(e);
+                    }
+                }
+            }
+            cleanup
+        } else {
+            false
+        };
+        
+        // Cleanup channels after borrow is released
+        if should_cleanup {
+            self.message_rx = None;
+            self.cancel_tx = None;
+        }
+    }
+
+    /// Start a scan (non-blocking - spawns background thread)
+    pub fn start(&mut self, config: ScanConfig) -> Result<()> {
         if self.state == ScanState::Running {
             bail!("Scan already in progress");
         }
@@ -76,14 +131,19 @@ impl ScanManager {
         let run_id = generate_run_id();
         let run_output_path = PathBuf::from(&config.output_path).join(&run_id);
         
+        // Create channels
+        let (message_tx, message_rx) = channel::<ScanMessage>();
+        let (cancel_tx, cancel_rx) = channel::<()>();
+
         // Reset state
         self.state = ScanState::Running;
         self.run_id = Some(run_id.clone());
         self.run_output_path = Some(run_output_path.display().to_string());
         self.progress = None;
         self.logs.clear();
-        self.cancel_flag = Arc::new(AtomicBool::new(false));
         self.error = None;
+        self.message_rx = Some(message_rx);
+        self.cancel_tx = Some(cancel_tx);
 
         // Build command arguments
         let args = build_cli_args(&config);
@@ -96,125 +156,11 @@ impl ScanManager {
             message: format!("Starting scan: {}", run_id),
         });
 
-        // Spawn process
-        let mut child = std::process::Command::new(&binary_path)
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Failed to spawn fastcarve")?;
-
-        self.child_pid = Some(child.id());
-
-        // Read stdout for progress
-        let stdout = child.stdout.take().context("Failed to capture stdout")?;
-        let stderr = child.stderr.take().context("Failed to capture stderr")?;
-
-        let cancel_flag = self.cancel_flag.clone();
-
-        // Process output in a blocking manner (we're already in an async context)
-        let stdout_reader = BufReader::new(stdout);
-        let stderr_reader = BufReader::new(stderr);
-
-        // Spawn threads to read output
-        let logs_for_stdout = &mut self.logs;
-        let progress_holder = &mut self.progress;
-
-        std::thread::scope(|s| {
-            // Stdout thread
-            let stdout_handle = s.spawn(|| {
-                let mut local_logs = Vec::new();
-                let mut local_progress = None;
-                
-                for line in stdout_reader.lines() {
-                    if cancel_flag.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    
-                    if let Ok(line) = line {
-                        if let Some((event_type, payload)) = parse_json_log(&line) {
-                            match event_type.as_str() {
-                                "progress" => {
-                                    if let Ok(prog) = serde_json::from_value::<ScanProgress>(payload) {
-                                        local_progress = Some(prog);
-                                    }
-                                }
-                                level => {
-                                    if let Some(msg) = payload.get("message").and_then(|v| v.as_str()) {
-                                        local_logs.push(LogEntry {
-                                            timestamp: Utc::now().to_rfc3339(),
-                                            level: level.to_uppercase(),
-                                            message: msg.to_string(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                (local_logs, local_progress)
-            });
-
-            // Stderr thread
-            let stderr_handle = s.spawn(|| {
-                let mut local_logs = Vec::new();
-                
-                for line in stderr_reader.lines() {
-                    if let Ok(line) = line {
-                        local_logs.push(LogEntry {
-                            timestamp: Utc::now().to_rfc3339(),
-                            level: "ERROR".to_string(),
-                            message: line,
-                        });
-                    }
-                }
-                
-                local_logs
-            });
-
-            // Wait for threads
-            if let Ok((stdout_logs, progress)) = stdout_handle.join() {
-                logs_for_stdout.extend(stdout_logs);
-                if progress.is_some() {
-                    *progress_holder = progress;
-                }
-            }
-            
-            if let Ok(stderr_logs) = stderr_handle.join() {
-                logs_for_stdout.extend(stderr_logs);
-            }
+        // Spawn scan thread (non-blocking!)
+        std::thread::spawn(move || {
+            run_scan_thread(binary_path, args, message_tx, cancel_rx);
         });
 
-        // Wait for process
-        let status = child.wait().context("Failed to wait for process")?;
-
-        // Update state based on result
-        if self.cancel_flag.load(Ordering::Relaxed) {
-            self.state = ScanState::Cancelled;
-            self.logs.push(LogEntry {
-                timestamp: Utc::now().to_rfc3339(),
-                level: "INFO".to_string(),
-                message: "Scan cancelled by user".to_string(),
-            });
-        } else if status.success() {
-            self.state = ScanState::Completed;
-            self.logs.push(LogEntry {
-                timestamp: Utc::now().to_rfc3339(),
-                level: "INFO".to_string(),
-                message: "Scan completed successfully".to_string(),
-            });
-        } else {
-            self.state = ScanState::Failed;
-            self.error = Some(format!("Process exited with code: {:?}", status.code()));
-            self.logs.push(LogEntry {
-                timestamp: Utc::now().to_rfc3339(),
-                level: "ERROR".to_string(),
-                message: format!("Scan failed: exit code {:?}", status.code()),
-            });
-        }
-
-        self.child_pid = None;
         Ok(())
     }
 
@@ -224,13 +170,9 @@ impl ScanManager {
             bail!("No scan in progress");
         }
 
-        self.cancel_flag.store(true, Ordering::Relaxed);
-
-        if let Some(pid) = self.child_pid {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
+        // Send cancel signal through channel
+        if let Some(tx) = &self.cancel_tx {
+            let _ = tx.send(());
         }
 
         Ok(())
@@ -241,6 +183,163 @@ impl Default for ScanManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Run the scan in a background thread - completely non-blocking to UI
+fn run_scan_thread(
+    binary_path: PathBuf,
+    args: Vec<String>,
+    message_tx: Sender<ScanMessage>,
+    cancel_rx: Receiver<()>,
+) {
+    // Spawn process
+    let child_result = std::process::Command::new(&binary_path)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let mut child = match child_result {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = message_tx.send(ScanMessage::Error(format!("Failed to spawn fastcarve: {}", e)));
+            let _ = message_tx.send(ScanMessage::StateChange(ScanState::Failed));
+            return;
+        }
+    };
+
+    let pid = child.id();
+    let _ = message_tx.send(ScanMessage::Log(LogEntry {
+        timestamp: Utc::now().to_rfc3339(),
+        level: "INFO".to_string(),
+        message: format!("Process started with PID: {}", pid),
+    }));
+
+    // Get stdout/stderr
+    let stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            let _ = message_tx.send(ScanMessage::Error("Failed to capture stdout".to_string()));
+            let _ = message_tx.send(ScanMessage::StateChange(ScanState::Failed));
+            return;
+        }
+    };
+    
+    let stderr = match child.stderr.take() {
+        Some(s) => s,
+        None => {
+            let _ = message_tx.send(ScanMessage::Error("Failed to capture stderr".to_string()));
+            let _ = message_tx.send(ScanMessage::StateChange(ScanState::Failed));
+            return;
+        }
+    };
+
+    let stdout_reader = BufReader::new(stdout);
+    let stderr_reader = BufReader::new(stderr);
+    
+    // Clone for stderr thread
+    let message_tx_stderr = message_tx.clone();
+
+    // Spawn stderr reader thread
+    let stderr_handle = std::thread::spawn(move || {
+        for line in stderr_reader.lines().map_while(Result::ok) {
+            let _ = message_tx_stderr.send(ScanMessage::Log(LogEntry {
+                timestamp: Utc::now().to_rfc3339(),
+                level: "STDERR".to_string(),
+                message: line,
+            }));
+        }
+    });
+
+    // Process stdout on this thread
+    let mut cancelled = false;
+    for line in stdout_reader.lines().map_while(Result::ok) {
+        // Check for cancel request (non-blocking)
+        if cancel_rx.try_recv().is_ok() {
+            cancelled = true;
+            // Kill the process
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = child.kill();
+            }
+            break;
+        }
+
+        // Parse JSON log line
+        if let Some((event_type, payload)) = parse_json_log(&line) {
+            if event_type == "progress" {
+                if let Ok(prog) = serde_json::from_value::<ScanProgress>(payload) {
+                    let _ = message_tx.send(ScanMessage::Progress(prog));
+                }
+            } else {
+                // It's a log entry
+                let msg = payload.get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&line);
+                
+                let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                    timestamp: Utc::now().to_rfc3339(),
+                    level: event_type.to_uppercase(),
+                    message: msg.to_string(),
+                }));
+            }
+        } else {
+            // Plain text line
+            let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                timestamp: Utc::now().to_rfc3339(),
+                level: "INFO".to_string(),
+                message: line,
+            }));
+        }
+    }
+
+    // Wait for stderr thread
+    let _ = stderr_handle.join();
+
+    // Wait for process to finish
+    let status = child.wait();
+
+    // Determine final state and send it
+    let final_state = if cancelled {
+        let _ = message_tx.send(ScanMessage::Log(LogEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            level: "INFO".to_string(),
+            message: "Scan cancelled by user".to_string(),
+        }));
+        ScanState::Cancelled
+    } else {
+        match status {
+            Ok(s) if s.success() => {
+                let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                    timestamp: Utc::now().to_rfc3339(),
+                    level: "INFO".to_string(),
+                    message: "Scan completed successfully".to_string(),
+                }));
+                ScanState::Completed
+            }
+            Ok(s) => {
+                let _ = message_tx.send(ScanMessage::Error(
+                    format!("Process exited with code: {:?}", s.code())
+                ));
+                let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                    timestamp: Utc::now().to_rfc3339(),
+                    level: "ERROR".to_string(),
+                    message: format!("Scan failed: exit code {:?}", s.code()),
+                }));
+                ScanState::Failed
+            }
+            Err(e) => {
+                let _ = message_tx.send(ScanMessage::Error(format!("Wait error: {}", e)));
+                ScanState::Failed
+            }
+        }
+    };
+
+    let _ = message_tx.send(ScanMessage::StateChange(final_state));
 }
 
 /// Generate a unique run ID

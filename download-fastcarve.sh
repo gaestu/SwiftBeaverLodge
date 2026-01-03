@@ -21,13 +21,13 @@ case "$ARCH" in
         ;;
 esac
 
-# Map OS
+# Map OS to filename format (actual GitHub release naming)
 case "$OS" in
     linux)
-        PLATFORM="unknown-linux-gnu"
+        OS_NAME="linux"
         ;;
     darwin)
-        PLATFORM="apple-darwin"
+        OS_NAME="macos"
         ;;
     *)
         echo "Unsupported OS: $OS"
@@ -35,8 +35,8 @@ case "$OS" in
         ;;
 esac
 
-TARGET="${ARCH}-${PLATFORM}"
-FILENAME="fastcarve-${VERSION}-${TARGET}.tar.gz"
+# GitHub release uses format: fastcarve-linux-x86_64.tar.gz
+FILENAME="fastcarve-${OS_NAME}-${ARCH}.tar.gz"
 URL="https://github.com/gaestu/SwiftBeaver/releases/download/${VERSION}/${FILENAME}"
 
 echo "Downloading fastcarve ${VERSION} for ${TARGET}..."

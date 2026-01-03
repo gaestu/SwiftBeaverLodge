@@ -47,18 +47,14 @@ impl SwiftBeaverApp {
     /// Start a scan with current configuration
     fn start_scan(&mut self) {
         let config = self.config.clone();
-        let manager = self.scan_manager.clone();
         
-        // Spawn blocking task - the scan manager locks internally
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-            rt.block_on(async {
-                let mut mgr = manager.lock().unwrap();
-                if let Err(e) = mgr.start(config).await {
-                    tracing::error!("Failed to start scan: {}", e);
-                }
-            });
-        });
+        // Start scan directly - the new manager spawns its own thread
+        let mut mgr = self.scan_manager.lock().unwrap();
+        if let Err(e) = mgr.start(config) {
+            tracing::error!("Failed to start scan: {}", e);
+            self.status_message = format!("Error: {}", e);
+            return;
+        }
         
         self.current_tab = Tab::Monitor;
         self.status_message = "Scan started...".to_string();
@@ -77,7 +73,13 @@ impl SwiftBeaverApp {
 
 impl eframe::App for SwiftBeaverApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll scan manager for updates
+        // Poll scan manager for updates (non-blocking!)
+        {
+            let mut mgr = self.scan_manager.lock().unwrap();
+            mgr.poll();  // Process any pending messages from scan thread
+        }
+        
+        // Now get current state
         let (state, progress, run_path, logs) = {
             let mgr = self.scan_manager.lock().unwrap();
             (
