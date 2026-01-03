@@ -18,6 +18,7 @@ pub enum Tab {
 }
 
 impl Tab {
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             Tab::Configure => "⚙ Configure",

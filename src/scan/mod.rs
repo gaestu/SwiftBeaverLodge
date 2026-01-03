@@ -4,7 +4,7 @@ mod manager;
 pub mod progress;
 
 pub use manager::ScanManager;
-pub use progress::{ScanProgress, format_bytes, format_duration};
+pub use progress::{ScanProgress, format_bytes};
 
 /// Scan state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

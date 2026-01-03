@@ -8,6 +8,7 @@ use crate::config::{ScanConfig, MetadataBackend, FILE_TYPES};
 /// Configuration panel state
 pub struct ConfigPanel {
     /// Show advanced options
+    #[allow(dead_code)]
     show_advanced: bool,
 }
 

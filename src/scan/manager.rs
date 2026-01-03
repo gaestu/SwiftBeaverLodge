@@ -66,6 +66,7 @@ impl ScanManager {
         self.run_output_path.as_deref()
     }
 
+    #[allow(dead_code)]
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }

@@ -30,6 +30,7 @@ impl MetadataReader {
     }
 
     /// Get the metadata backend type
+    #[allow(dead_code)]
     pub fn backend(&self) -> &str {
         &self.backend
     }

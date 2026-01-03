@@ -46,6 +46,7 @@ pub struct StringArtefact {
 }
 
 /// File type category for filtering
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileType {
     Image,
@@ -57,6 +58,7 @@ pub enum FileType {
 }
 
 impl FileType {
+    #[allow(dead_code)]
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
             "jpeg" | "jpg" | "png" | "gif" | "bmp" | "webp" | "ico" | "tiff" => FileType::Image,
@@ -68,6 +70,7 @@ impl FileType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             FileType::Image => "Images",

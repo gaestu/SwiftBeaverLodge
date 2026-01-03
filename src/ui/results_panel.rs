@@ -96,6 +96,7 @@ impl ResultsPanel {
     }
 
     /// Clear loaded results
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.run_path = None;
         self.reader = None;
