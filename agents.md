@@ -11,52 +11,60 @@
 ### Tech Stack
 | Layer | Technology |
 |-------|------------|
-| Framework | Tauri 2.x |
-| Frontend | Svelte 5 + TypeScript |
-| Styling | TailwindCSS 4.x + Skeleton UI |
-| Backend | Rust (Tauri commands) |
-| Core Engine | SwiftBeaver/fastcarve (Rust crate) |
-| Build | Vite 6.x |
+| GUI Framework | egui 0.29 + eframe |
+| Language | Rust (100%) |
+| Metadata | parquet + arrow |
+| Async | tokio |
+| File Dialogs | rfd |
+| Core Engine | fastcarve binary (subprocess) |
 
 ### Project Structure
 ```
 SwiftBeaverLodge/
-├── src/                    # Svelte frontend
-│   ├── lib/
-│   │   ├── components/     # Svelte components
-│   │   ├── stores/         # Svelte stores (state)
-│   │   ├── api/            # Tauri IPC wrappers
-│   │   └── utils/          # Utility functions
-│   └── routes/             # SvelteKit routes
-├── src-tauri/              # Rust backend
-│   ├── src/
-│   │   ├── commands/       # Tauri commands
-│   │   ├── scan/           # Scan management
-│   │   └── results/        # Result processing
-│   └── Cargo.toml
-├── swiftbeaver-upstream/   # Cloned SwiftBeaver repo (reference only)
-└── docs/                   # Documentation
+├── src/
+│   ├── main.rs           # Entry point, eframe setup
+│   ├── lib.rs            # Library exports for tests
+│   ├── app.rs            # Main application state & UI loop
+│   ├── config.rs         # ScanConfig, MetadataBackend
+│   ├── scan/
+│   │   ├── mod.rs        # ScanState, LogEntry, exports
+│   │   ├── manager.rs    # ScanManager - subprocess spawning
+│   │   └── progress.rs   # ScanProgress, JSON parsing
+│   ├── metadata/
+│   │   ├── mod.rs        # detect_metadata_backend()
+│   │   ├── reader.rs     # MetadataReader - Parquet/JSONL
+│   │   └── types.rs      # CarvedFile, StringArtefact
+│   └── ui/
+│       ├── mod.rs        # Tab enum, panel exports
+│       ├── config_panel.rs
+│       ├── progress_panel.rs
+│       └── results_panel.rs
+├── bin/
+│   └── fastcarve         # Downloaded binary
+├── tests/
+│   └── integration_tests.rs
+├── Cargo.toml
+└── README.md
 ```
 
 ---
 
-## 2. SwiftBeaver Integration Notes
+## 2. SwiftBeaver Integration
 
 ### Integration Method: Binary Subprocess
 
-SwiftBeaverLodge uses the **pre-built fastcarve binary** from [GitHub releases](https://github.com/gaestu/SwiftBeaver/releases) rather than the crate API. This provides:
+SwiftBeaverLodge uses the **pre-built fastcarve binary** from [GitHub releases](https://github.com/gaestu/SwiftBeaver/releases):
 
 - **Stable releases** - Pinned to tested versions (v0.2.1)
-- **Faster builds** - No need to compile fastcarve from source
-- **Simpler dependencies** - No libewf/GPU SDK required at build time
+- **Faster builds** - No libewf/GPU SDK required at build time
 - **Cross-platform** - Pre-built binaries per platform
 
 ### Binary Location
 
 ```
-src-tauri/
+SwiftBeaverLodge/
 ├── bin/
-│   └── fastcarve          # Downloaded binary (dev/bundled)
+│   └── fastcarve          # Downloaded binary
 └── download-fastcarve.sh  # Script to download binary
 ```
 
@@ -82,9 +90,7 @@ src-tauri/
    // fastcarve with --log-format json emits:
    // {"timestamp":"...","level":"INFO","message":"progress bytes_scanned=1234 ..."}
    
-   fn parse_json_log(line: &str) -> Option<(String, Value)> {
-       // Extract level, message, and progress fields
-   }
+   fn parse_json_log(line: &str) -> Option<(String, Value)>
    ```
 
 3. **Cancellation** - Send SIGTERM to the subprocess:
@@ -95,11 +101,7 @@ src-tauri/
 
 4. **Metadata Reading** - Auto-detect Parquet (default) or JSONL:
    ```rust
-   fn detect_metadata_backend(run_path: &Path) -> &'static str {
-       if run_path.join("parquet").exists() { "parquet" }
-       else if run_path.join("metadata/carved_files.jsonl").exists() { "jsonl" }
-       else { "unknown" }
-   }
+   fn detect_metadata_backend(run_path: &Path) -> Option<&'static str>
    ```
 
 ### CLI Arguments Reference
@@ -116,104 +118,69 @@ src-tauri/
 | `--gpu` | Enable GPU acceleration |
 | `--compute-evidence-sha256` | Compute evidence hash |
 
-### ProgressSnapshot Fields (from JSON logs)
-
-```
-progress bytes_scanned=N total_bytes=N pct=N.N hits=N files=N rate_mib=N.NN eta_secs=Some(N)
-```
-
 ---
 
 ## 3. Coding Standards
 
-### 3.1 Rust (src-tauri/)
+### Rust Code Style
 
 ```rust
-// ✅ DO: Use proper error handling with anyhow/thiserror
-use anyhow::{Context, Result};
+// ✅ DO: Use proper error handling with anyhow
+use anyhow::{Context, Result, bail};
 
-#[tauri::command]
-async fn start_scan(config: ScanConfig) -> Result<String, String> {
-    do_scan(config)
-        .await
-        .map_err(|e| e.to_string())
+pub fn read_metadata(path: &Path) -> Result<Vec<CarvedFile>> {
+    let file = File::open(path)
+        .context("Failed to open metadata file")?;
+    // ...
 }
 
-// ✅ DO: Use Arc for shared state across async boundaries
-use std::sync::Arc;
-use tokio::sync::Mutex;
+// ✅ DO: Use Arc<Mutex<>> for shared state
+use std::sync::{Arc, Mutex};
 
-struct AppState {
+struct App {
     scan_manager: Arc<Mutex<ScanManager>>,
 }
 
-// ✅ DO: Emit events for real-time UI updates
-use tauri::Emitter;
+// ✅ DO: Use proper struct organization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanConfig {
+    pub input_path: String,
+    pub output_path: String,
+    // ...
+}
 
-app.emit("scan:progress", &progress_data)?;
-
-// ❌ DON'T: Block the async runtime
 // ❌ DON'T: Use unwrap() in production code
-// ❌ DON'T: Expose raw file paths in error messages (forensic security)
+// ❌ DON'T: Block the UI thread with long operations
+// ❌ DON'T: Expose raw file paths in error messages
 ```
 
-### 3.2 Svelte/TypeScript (src/)
+### egui UI Patterns
 
-```typescript
-// ✅ DO: Use TypeScript strict mode
-// ✅ DO: Define interfaces for all Tauri command responses
-interface ScanProgress {
-  bytes_scanned: number;
-  total_bytes: number;
-  throughput_mib: number;
-  eta_seconds: number | null;
+```rust
+// ✅ DO: Use immediate-mode UI pattern
+impl eframe::App for MyApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Title");
+            if ui.button("Click me").clicked() {
+                self.do_something();
+            }
+        });
+    }
 }
 
-// ✅ DO: Use Svelte 5 runes ($state, $derived, $effect)
-let progress = $state<ScanProgress | null>(null);
-let percentage = $derived(
-  progress ? (progress.bytes_scanned / progress.total_bytes) * 100 : 0
-);
+// ✅ DO: Use panels for layout
+egui::SidePanel::left("sidebar").show(ctx, |ui| { ... });
+egui::TopBottomPanel::top("menu").show(ctx, |ui| { ... });
+egui::CentralPanel::default().show(ctx, |ui| { ... });
 
-// ✅ DO: Wrap Tauri commands in typed functions
-import { invoke } from '@tauri-apps/api/core';
+// ✅ DO: Use RichText for styling
+ui.label(RichText::new("Important").strong().color(Color32::RED));
 
-export async function startScan(config: ScanConfig): Promise<string> {
-  return invoke<string>('start_scan', { config });
+// ✅ DO: Request repaint for animations
+if self.is_scanning {
+    ctx.request_repaint_after(Duration::from_millis(100));
 }
-
-// ✅ DO: Use Tauri event listeners with cleanup
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-
-$effect(() => {
-  let unlisten: UnlistenFn;
-  
-  listen<ScanProgress>('scan:progress', (event) => {
-    progress = event.payload;
-  }).then((fn) => { unlisten = fn; });
-  
-  return () => { unlisten?.(); };
-});
-
-// ❌ DON'T: Use any type
-// ❌ DON'T: Mutate props directly
-// ❌ DON'T: Put business logic in components (use stores)
-```
-
-### 3.3 CSS/Styling
-
-```svelte
-<!-- ✅ DO: Use Tailwind utility classes -->
-<div class="flex items-center gap-4 p-4 bg-surface-800 rounded-lg">
-
-<!-- ✅ DO: Use Skeleton UI components -->
-<ProgressBar value={percentage} max={100} />
-
-<!-- ✅ DO: Support dark mode (forensic environments) -->
-<div class="dark:bg-surface-900 dark:text-white">
-
-<!-- ❌ DON'T: Use inline styles -->
-<!-- ❌ DON'T: Create custom CSS when Tailwind/Skeleton has utilities -->
 ```
 
 ---
@@ -222,298 +189,188 @@ $effect(() => {
 
 | Type | Convention | Example |
 |------|------------|---------|
-| Svelte components | PascalCase | `FileSelector.svelte` |
-| TypeScript modules | camelCase | `scanManager.ts` |
-| Rust modules | snake_case | `scan_manager.rs` |
-| Stores | camelCase + Store suffix | `scanStore.ts` |
-| Types/Interfaces | PascalCase | `ScanConfig` |
-| Constants | SCREAMING_SNAKE | `MAX_CHUNK_SIZE` |
-| Tauri commands | snake_case | `start_scan` |
-| Tauri events | namespace:action | `scan:progress` |
+| Modules | snake_case | `scan_manager.rs` |
+| Structs | PascalCase | `ScanConfig` |
+| Functions | snake_case | `parse_progress_message` |
+| Constants | SCREAMING_SNAKE | `FILE_TYPES` |
+| Enums | PascalCase | `MetadataBackend` |
+| Test functions | snake_case with test_ prefix | `test_parse_progress` |
 
 ---
 
-## 5. Component Guidelines
+## 5. Module Guidelines
 
-### Component Structure
-```svelte
-<script lang="ts">
-  // 1. Imports
-  import { ProgressBar } from '@skeletonlabs/skeleton-svelte';
-  import { scanStore } from '$lib/stores/scan';
-  
-  // 2. Props (Svelte 5 syntax)
-  interface Props {
-    value: number;
-    label?: string;
-  }
-  let { value, label = 'Progress' }: Props = $props();
-  
-  // 3. State
-  let isHovered = $state(false);
-  
-  // 4. Derived values
-  let displayValue = $derived(`${value.toFixed(1)}%`);
-  
-  // 5. Effects
-  $effect(() => {
-    // Side effects here
-  });
-  
-  // 6. Functions
-  function handleClick() {
-    // ...
-  }
-</script>
-
-<!-- Template -->
-<div class="...">
-  <span>{label}: {displayValue}</span>
-  <ProgressBar {value} max={100} />
-</div>
-```
-
-### Store Structure
-```typescript
-// src/lib/stores/scan.ts
-import { writable, derived } from 'svelte/store';
-
-interface ScanState {
-  status: 'idle' | 'running' | 'paused' | 'completed' | 'failed';
-  progress: ScanProgress | null;
-  runId: string | null;
-  error: string | null;
-}
-
-function createScanStore() {
-  const { subscribe, set, update } = writable<ScanState>({
-    status: 'idle',
-    progress: null,
-    runId: null,
-    error: null,
-  });
-
-  return {
-    subscribe,
-    start: (runId: string) => update(s => ({ ...s, status: 'running', runId })),
-    updateProgress: (progress: ScanProgress) => update(s => ({ ...s, progress })),
-    complete: () => update(s => ({ ...s, status: 'completed' })),
-    fail: (error: string) => update(s => ({ ...s, status: 'failed', error })),
-    reset: () => set({ status: 'idle', progress: null, runId: null, error: null }),
-  };
-}
-
-export const scanStore = createScanStore();
-```
-
----
-
-## 6. Tauri Command Guidelines
-
-### Command Definition (Rust)
+### Module Structure
 ```rust
-// src-tauri/src/commands/scan.rs
+//! Module documentation
+//! 
+//! Describes the purpose of this module.
 
-use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+mod submodule;
 
-#[derive(Debug, Deserialize)]
-pub struct ScanConfig {
-    pub input_path: String,
-    pub output_path: String,
-    pub file_types: Vec<String>,
-    // ... other fields
-}
+pub use submodule::PublicType;
 
-#[derive(Debug, Serialize)]
-pub struct ScanHandle {
-    pub run_id: String,
-}
+// Public types
+pub struct MyType { ... }
 
-/// Start a forensic scan operation
-/// 
-/// # Arguments
-/// * `config` - Scan configuration from frontend
-/// * `state` - Application state (injected by Tauri)
-/// * `app` - App handle for event emission
-#[tauri::command]
-pub async fn start_scan(
-    config: ScanConfig,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<ScanHandle, String> {
-    let mut manager = state.scan_manager.lock().await;
-    manager.start(config, app)
-        .await
-        .map_err(|e| format!("Scan failed: {e}"))
+// Public functions
+pub fn my_function() -> Result<()> { ... }
+
+// Private helpers
+fn helper() { ... }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_something() { ... }
 }
 ```
 
-### Command Invocation (TypeScript)
-```typescript
-// src/lib/api/scan.ts
-
-import { invoke } from '@tauri-apps/api/core';
-
-export interface ScanConfig {
-  input_path: string;
-  output_path: string;
-  file_types: string[];
-}
-
-export interface ScanHandle {
-  run_id: string;
-}
-
-export async function startScan(config: ScanConfig): Promise<ScanHandle> {
-  return invoke<ScanHandle>('start_scan', { config });
-}
-```
-
----
-
-## 7. Error Handling
-
-### Rust Errors
+### UI Panel Structure
 ```rust
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum ScanError {
-    #[error("Invalid input path: {0}")]
-    InvalidInput(String),
-    
-    #[error("Evidence source error: {0}")]
-    Evidence(#[from] anyhow::Error),
-    
-    #[error("Scan already in progress")]
-    AlreadyRunning,
+pub struct ConfigPanel {
+    // Panel-specific state
 }
 
-// Convert to user-friendly strings for frontend
-impl From<ScanError> for String {
-    fn from(err: ScanError) -> String {
-        err.to_string()
+impl Default for ConfigPanel {
+    fn default() -> Self { Self::new() }
+}
+
+impl ConfigPanel {
+    pub fn new() -> Self { ... }
+    
+    pub fn show(&mut self, ui: &mut Ui, config: &mut ScanConfig) {
+        // Render UI
     }
 }
 ```
 
-### Frontend Error Display
-```svelte
-<script lang="ts">
-  import { Toast } from '@skeletonlabs/skeleton-svelte';
-  
-  async function handleStartScan() {
-    try {
-      const handle = await startScan(config);
-      // success
-    } catch (error) {
-      // Show toast notification
-      toastStore.trigger({
-        message: `Scan failed: ${error}`,
-        background: 'variant-filled-error',
-      });
-    }
-  }
-</script>
-```
-
 ---
 
-## 8. Testing Guidelines
+## 6. Testing Guidelines
 
-### Rust Tests
+### Unit Tests
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_config_validation() {
-        let config = ScanConfig {
-            input_path: "/nonexistent".into(),
-            // ...
-        };
-        assert!(validate_config(&config).is_err());
-    }
-
-    #[tokio::test]
-    async fn test_scan_lifecycle() {
-        // Test start -> progress -> complete
+    fn test_parse_progress_message() {
+        let msg = "progress bytes_scanned=1000 total_bytes=10000 ...";
+        let progress = parse_progress_message(msg).unwrap();
+        assert_eq!(progress.bytes_scanned, 1000);
     }
 }
 ```
 
-### Frontend Tests (Vitest)
-```typescript
-// src/lib/utils/formatters.test.ts
-import { describe, it, expect } from 'vitest';
-import { formatBytes, formatDuration } from './formatters';
+### Integration Tests (tests/ directory)
+```rust
+use swiftbeaverlodge::metadata::MetadataReader;
 
-describe('formatBytes', () => {
-  it('formats bytes correctly', () => {
-    expect(formatBytes(1024)).toBe('1.00 KB');
-    expect(formatBytes(1048576)).toBe('1.00 MB');
-  });
-});
+#[test]
+fn test_metadata_reader_mock() {
+    let temp = TempDir::new().unwrap();
+    // Create mock data
+    let reader = MetadataReader::new(temp.path()).unwrap();
+    // Assert results
+}
+```
+
+### Test Count Target
+- **Minimum:** 50 tests across unit + integration
+- **Current:** 69 tests (28 lib + 35 bin + 6 integration)
+
+---
+
+## 7. Error Handling
+
+### Pattern: Result with Context
+```rust
+use anyhow::{Context, Result, bail};
+
+pub fn do_thing(path: &Path) -> Result<Data> {
+    if !path.exists() {
+        bail!("Path does not exist: {}", path.display());
+    }
+    
+    let file = File::open(path)
+        .context("Failed to open file")?;
+    
+    let data = parse_file(file)
+        .with_context(|| format!("Failed to parse: {}", path.display()))?;
+    
+    Ok(data)
+}
+```
+
+### UI Error Display
+```rust
+if let Some(error) = &self.error {
+    ui.colored_label(Color32::RED, format!("Error: {}", error));
+}
 ```
 
 ---
 
-## 9. Security Considerations
+## 8. Security Considerations
 
 ### Forensic Integrity
 - ✅ ALWAYS use read-only access to evidence files
 - ✅ ALWAYS compute/verify SHA-256 hashes
 - ✅ ALWAYS log operations for audit trail
 - ❌ NEVER modify evidence files
-- ❌ NEVER include evidence paths in error messages shown to users (use generic messages)
+- ❌ NEVER include evidence paths in user-facing error messages
 
-### Tauri Security
-```json
-// src-tauri/capabilities/default.json
-{
-  "permissions": [
-    "core:default",
-    "dialog:default",
-    "fs:allow-read",
-    "fs:allow-write"
-  ]
+### Input Validation
+```rust
+fn validate_config(config: &ScanConfig) -> Vec<String> {
+    let mut issues = Vec::new();
+    
+    if config.input_path.is_empty() {
+        issues.push("Input file path is required".to_string());
+    } else if !Path::new(&config.input_path).exists() {
+        issues.push("Input file does not exist".to_string());
+    }
+    
+    issues
 }
 ```
-- Only request necessary permissions
-- No network permissions (offline-capable)
-- No shell execution (except controlled commands)
 
 ---
 
-## 10. Performance Guidelines
+## 9. Performance Guidelines
 
 ### Large File Handling
-```typescript
+```rust
 // ✅ DO: Stream large data, don't load all at once
 // ✅ DO: Use pagination for metadata tables
-// ✅ DO: Generate thumbnails lazily
+// ✅ DO: Limit displayed items (e.g., 500 max)
 
-// ❌ DON'T: Load entire JSONL into memory
-// ❌ DON'T: Generate all thumbnails at startup
+// ❌ DON'T: Load entire JSONL into memory at once
+// ❌ DON'T: Display unbounded lists
 ```
 
 ### UI Responsiveness
-```svelte
-<!-- ✅ DO: Debounce rapid updates -->
-<script>
-  import { debounce } from '$lib/utils/debounce';
-  
-  const debouncedUpdate = debounce((value) => {
-    // Update UI
-  }, 100);
-</script>
+```rust
+// ✅ DO: Run long operations in separate thread
+std::thread::spawn(move || {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async { ... });
+});
+
+// ✅ DO: Poll state from UI thread
+fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    let state = self.scan_manager.lock().unwrap().state();
+    // Update UI based on state
+}
 ```
 
 ---
 
-## 11. Commit Message Format
+## 10. Commit Message Format
 
 ```
 type(scope): description
@@ -530,65 +387,35 @@ Examples:
 feat(scan): add pause/resume functionality
 fix(ui): correct progress bar overflow on long scans
 docs(readme): update installation instructions
-chore(deps): update tauri to 2.1.0
+chore(deps): update egui to 0.30
 ```
 
 ---
 
-## 12. Quick Reference: Binary Integration
+## 11. Quick Reference
 
-### Download Binary
-
+### Build Commands
 ```bash
-cd src-tauri
-./download-fastcarve.sh  # Downloads v0.2.1 to bin/fastcarve
+cargo build           # Debug build
+cargo build --release # Release build
+cargo test            # Run all tests
+cargo check           # Type check only
+cargo clippy          # Lint
 ```
 
-### Spawn Subprocess
-
-```rust
-use std::process::{Command, Stdio};
-
-let mut child = Command::new("bin/fastcarve")
-    .args(&[
-        "--input", &input_path,
-        "--output", &output_path,
-        "--log-format", "json",
-        "--progress-interval-secs", "1",
-        "--metadata-backend", "parquet",
-    ])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()?;
+### Binary Download
+```bash
+./download-fastcarve.sh  # Downloads to bin/fastcarve
 ```
 
-### Parse Progress
-
-```rust
-// JSON log line: {"timestamp":"...","level":"INFO","message":"progress bytes_scanned=..."}
-fn parse_progress_message(message: &str) -> Option<GuiScanProgress> {
-    let parts: HashMap<&str, &str> = message
-        .strip_prefix("progress ")?
-        .split_whitespace()
-        .filter_map(|p| { let mut s = p.splitn(2, '='); Some((s.next()?, s.next()?)) })
-        .collect();
-    // Extract bytes_scanned, total_bytes, hits, files, rate_mib, eta_secs
-}
-```
-
-### Read Parquet Results
-
-```rust
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-let file = File::open("output/run_id/parquet/files_jpeg.parquet")?;
-let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
-
-for batch in reader {
-    // Process Arrow RecordBatch
-}
-```
+### Key Types
+- `ScanConfig` - Configuration for a scan
+- `ScanManager` - Manages subprocess lifecycle
+- `ScanProgress` - Progress snapshot from fastcarve
+- `MetadataReader` - Reads Parquet/JSONL results
+- `CarvedFile` - Single carved file metadata
+- `Tab` - UI tab enum (Configure/Monitor/Results)
 
 ---
 
-*Last Updated: January 2, 2026*
+*Last Updated: January 3, 2025*

@@ -2,7 +2,10 @@
 
 🦫 **GUI Frontend for SwiftBeaver Forensic File Carver**
 
-SwiftBeaverLodge is a modern desktop application for forensic file recovery, built with Tauri and Svelte. It provides a user-friendly interface for the powerful SwiftBeaver file carving engine.
+A pure Rust desktop application for forensic file recovery using [egui](https://github.com/emilk/egui). Provides a user-friendly interface for the [SwiftBeaver](https://github.com/gaestu/SwiftBeaver) file carving engine.
+
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)
 
 ## Features
 
@@ -10,119 +13,154 @@ SwiftBeaverLodge is a modern desktop application for forensic file recovery, bui
 - 🔍 **Comprehensive file recovery** - Images, documents, archives, databases, media, and more
 - 🔗 **String/URL/Email extraction** - Find text patterns in evidence
 - 📊 **Real-time progress monitoring** - Live throughput, ETA, and statistics
-- 🖼️ **Result browsing with thumbnails** - Preview recovered files
+- 📁 **Result browsing** - Filter and search carved files
 - 💾 **Offline/Airgapped operation** - No network required for forensic integrity
 - 🚀 **GPU acceleration** - Optional OpenCL/CUDA support
+- 🎯 **Single binary** - No npm, no web stack, just `cargo build`
 
-## Prerequisites
+## Quick Start
+
+### Prerequisites
+
+1. **Rust 1.70+** - Install from [rustup.rs](https://rustup.rs)
+2. **fastcarve binary** - Download from [SwiftBeaver releases](https://github.com/gaestu/SwiftBeaver/releases)
 
 ### Linux System Dependencies
 
+**Fedora:**
 ```bash
-# Ubuntu/Debian
-sudo apt update
-sudo apt install -y \
-  libwebkit2gtk-4.1-dev \
-  libgtk-3-dev \
-  libayatana-appindicator3-dev \
-  librsvg2-dev \
-  libsoup-3.0-dev \
-  libjavascriptcoregtk-4.1-dev
-
-# Fedora
-sudo dnf install -y \
-  webkit2gtk4.1-devel \
-  gtk3-devel \
-  libappindicator-gtk3-devel \
-  librsvg2-devel \
-  libsoup3-devel \
-  javascriptcoregtk4.1-devel
-
-# Arch Linux
-sudo pacman -S --needed \
-  webkit2gtk-4.1 \
-  base-devel \
-  curl \
-  wget \
-  openssl \
-  appmenu-gtk-module \
-  libappindicator-gtk3 \
-  librsvg
+sudo dnf install gtk3-devel glib2-devel pango-devel atk-devel \
+                 gdk-pixbuf2-devel cairo-devel cairo-gobject-devel \
+                 libxkbcommon-devel wayland-devel
 ```
 
-### Additional Requirements
+**Ubuntu/Debian:**
+```bash
+sudo apt install libgtk-3-dev libglib2.0-dev libpango1.0-dev \
+                 libatk1.0-dev libgdk-pixbuf2.0-dev libcairo2-dev \
+                 libxkbcommon-dev libwayland-dev
+```
 
-- **Rust** (rustup.rs recommended)
-- **Node.js** 18+ and npm
-
-## Installation
+### Installation
 
 ```bash
 # Clone the repository
 git clone https://github.com/yourusername/SwiftBeaverLodge.git
 cd SwiftBeaverLodge
 
-# Install Node.js dependencies
-npm install
+# Download fastcarve binary (Linux)
+./download-fastcarve.sh
 
-# Build and run in development mode
-npm run tauri dev
+# Build
+cargo build --release
 
-# Build for production
-npm run tauri build
+# Run
+./target/release/swiftbeaverlodge
+```
+
+## Screenshot
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  SwiftBeaverLodge                                            │
+├────────────────┬─────────────────────────────────────────────┤
+│                │                                             │
+│  ⚙ Configure   │  Scan Configuration                        │
+│  📊 Monitor    │  ┌──────────────────────────────────────┐  │
+│  📁 Results    │  │ Evidence File: [/path/to/image.dd]   │  │
+│                │  │ Output Dir:    [/output/carved]      │  │
+│  ▶ Start Scan  │  │                                      │  │
+│                │  │ File Types: ☑ jpeg ☑ png ☑ pdf...    │  │
+│  ● Idle        │  │ Metadata:   ◉ Parquet ○ JSONL ○ CSV  │  │
+│                │  └──────────────────────────────────────┘  │
+├────────────────┴─────────────────────────────────────────────┤
+│  Ready                                  fastcarve: v0.2.1    │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Usage
 
-1. **Select Evidence Source** - Choose a disk image, E01 file, or block device
-2. **Configure Output** - Set the output directory for recovered files
-3. **Choose File Types** - Select which file types to recover
-4. **Configure Options** - Enable string scanning, GPU acceleration, etc.
-5. **Start Scan** - Monitor progress in real-time
-6. **Browse Results** - View recovered files and artefacts
+1. **Configure** - Set evidence file, output directory, and file types
+2. **Start Scan** - Click "▶ Start Scan" to begin carving
+3. **Monitor** - Watch real-time progress and logs
+4. **Browse Results** - View carved files and metadata
 
 ## Project Structure
 
 ```
 SwiftBeaverLodge/
-├── src/                    # Svelte frontend
-│   ├── lib/
-│   │   ├── api/           # Tauri IPC wrappers
-│   │   ├── components/    # UI components
-│   │   ├── stores/        # State management
-│   │   └── utils/         # Utilities
-│   └── routes/            # SvelteKit routes
-├── src-tauri/              # Rust backend
-│   └── src/
-│       ├── commands/      # Tauri commands
-│       ├── scan/          # Scan management
-│       └── types.rs       # Type definitions
-└── docs/                   # Documentation
+├── src/
+│   ├── main.rs           # Application entry point
+│   ├── lib.rs            # Library exports
+│   ├── app.rs            # Main application state
+│   ├── config.rs         # Scan configuration types
+│   ├── scan/             # Scan management
+│   │   ├── mod.rs        # Module exports
+│   │   ├── manager.rs    # Subprocess spawning
+│   │   └── progress.rs   # Progress parsing
+│   ├── metadata/         # Result reading
+│   │   ├── mod.rs        # Module exports
+│   │   ├── reader.rs     # Parquet/JSONL reader
+│   │   └── types.rs      # Metadata types
+│   └── ui/               # UI components
+│       ├── mod.rs        # Tab enum, exports
+│       ├── config_panel.rs
+│       ├── progress_panel.rs
+│       └── results_panel.rs
+├── bin/
+│   └── fastcarve         # Downloaded binary
+├── tests/
+│   └── integration_tests.rs
+├── Cargo.toml
+└── README.md
 ```
 
-## Development
+## Configuration Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| Evidence File | Path to disk image or device | - |
+| Output Directory | Where to save carved files | - |
+| File Types | Which file types to carve | Common types |
+| Metadata Format | parquet/jsonl/csv | parquet |
+| String Scanning | Extract URLs/emails/phones | enabled |
+| GPU Acceleration | Use GPU for faster scanning | disabled |
+| Evidence Hash | Compute SHA-256 of evidence | enabled |
+
+## Tests
 
 ```bash
-# Run development server
-npm run tauri dev
+# Run all tests (69 total)
+cargo test
 
-# Type check
-npm run check
-
-# Build for production
-npm run tauri build
+# Run with output
+cargo test -- --nocapture
 ```
 
-## Recommended IDE Setup
+## Tech Stack
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).
+- **[egui](https://github.com/emilk/egui)** - Immediate-mode GUI (pure Rust)
+- **[eframe](https://github.com/emilk/egui/tree/master/crates/eframe)** - egui framework
+- **[parquet](https://crates.io/crates/parquet) + [arrow](https://crates.io/crates/arrow)** - Metadata reading
+- **[tokio](https://tokio.rs/)** - Async runtime
+- **[rfd](https://crates.io/crates/rfd)** - Native file dialogs
 
 ## License
 
-MIT
+MIT License - see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-- [SwiftBeaver](https://github.com/gaestu/SwiftBeaver) - The forensic file carving engine
-- [Tauri](https://tauri.app) - Desktop application framework
-- [Svelte](https://svelte.dev) - Frontend framework
+- [SwiftBeaver](https://github.com/gaestu/SwiftBeaver) - The core forensic file carver by gaestu
+- [egui](https://github.com/emilk/egui) - Immediate-mode GUI library by emilk
+
+## ⚠️ Forensic Note
+
+**Important for forensic use:**
+
+- This tool operates in **read-only mode** on evidence
+- SHA-256 hashes are computed for verification
+- All operations are logged for audit trails
+- Evidence paths are never modified
+
+For forensic cases, always work with verified copies of evidence and maintain proper chain of custody documentation.
