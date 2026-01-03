@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use arrow::array::{Array, StringArray, UInt64Array, BooleanArray, UInt32Array};
+use arrow::array::{Array, StringArray, Int64Array, UInt64Array, BooleanArray, UInt32Array};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use super::types::{CarvedFile, StringArtefact, MetadataSummary};
@@ -75,24 +75,23 @@ impl MetadataReader {
             .build()?;
 
         let mut files = Vec::new();
+        let mut next_id: u64 = 0;
 
         for batch_result in reader {
             let batch = batch_result?;
             
-            // Get column arrays
-            let id_col = batch.column_by_name("id")
-                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+            // Get column arrays - use actual fastcarve column names
             let type_col = batch.column_by_name("file_type")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch.column_by_name("offset")
-                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+            let offset_col = batch.column_by_name("global_start")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
             let size_col = batch.column_by_name("size")
-                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
-            let output_col = batch.column_by_name("output_path")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+            let output_col = batch.column_by_name("carved_path")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
             let sha256_col = batch.column_by_name("sha256")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let valid_col = batch.column_by_name("is_valid")
+            let valid_col = batch.column_by_name("validated")
                 .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
             let width_col = batch.column_by_name("width")
                 .and_then(|c| c.as_any().downcast_ref::<UInt32Array>());
@@ -101,11 +100,11 @@ impl MetadataReader {
 
             for i in 0..batch.num_rows() {
                 let file = CarvedFile {
-                    id: id_col.map(|c| c.value(i)).unwrap_or(0),
-                    file_type: type_col.and_then(|c| c.value(i).to_string().into()).unwrap_or_default(),
-                    offset: offset_col.map(|c| c.value(i)).unwrap_or(0),
-                    size: size_col.map(|c| c.value(i)).unwrap_or(0),
-                    output_path: output_col.and_then(|c| Some(c.value(i).to_string())).unwrap_or_default(),
+                    id: next_id,
+                    file_type: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    offset: offset_col.map(|c| c.value(i) as u64).unwrap_or(0),
+                    size: size_col.map(|c| c.value(i) as u64).unwrap_or(0),
+                    output_path: output_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
                     sha256: sha256_col.and_then(|c| {
                         if c.is_null(i) { None } else { Some(c.value(i).to_string()) }
                     }),
@@ -119,6 +118,7 @@ impl MetadataReader {
                     }),
                 };
                 files.push(file);
+                next_id += 1;
             }
         }
 
@@ -158,13 +158,142 @@ impl MetadataReader {
 
     /// Read string artefacts from Parquet
     fn read_string_artefacts_parquet(&self) -> Result<Vec<StringArtefact>> {
-        let parquet_path = self.run_path.join("parquet").join("strings.parquet");
-        
-        if !parquet_path.exists() {
-            return Ok(Vec::new());
+        let parquet_dir = self.run_path.join("parquet");
+        let mut all_artefacts = Vec::new();
+
+        // Read URLs
+        let urls_path = parquet_dir.join("artefacts_urls.parquet");
+        if urls_path.exists() {
+            all_artefacts.extend(self.read_url_artefacts(&urls_path)?);
         }
 
-        let file = File::open(&parquet_path)?;
+        // Read emails
+        let emails_path = parquet_dir.join("artefacts_emails.parquet");
+        if emails_path.exists() {
+            all_artefacts.extend(self.read_email_artefacts(&emails_path)?);
+        }
+
+        // Read phones
+        let phones_path = parquet_dir.join("artefacts_phones.parquet");
+        if phones_path.exists() {
+            all_artefacts.extend(self.read_phone_artefacts(&phones_path)?);
+        }
+
+        // Fallback: try legacy strings.parquet
+        let legacy_path = parquet_dir.join("strings.parquet");
+        if legacy_path.exists() {
+            all_artefacts.extend(self.read_legacy_strings(&legacy_path)?);
+        }
+
+        Ok(all_artefacts)
+    }
+
+    /// Read URL artefacts from Parquet
+    fn read_url_artefacts(&self, path: &Path) -> Result<Vec<StringArtefact>> {
+        let file = File::open(path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+            .build()?;
+
+        let mut artefacts = Vec::new();
+
+        for batch_result in reader {
+            let batch = batch_result?;
+            
+            let url_col = batch.column_by_name("url")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let offset_col = batch.column_by_name("global_start")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+            let end_col = batch.column_by_name("global_end")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+
+            for i in 0..batch.num_rows() {
+                let offset = offset_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let end = end_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let artefact = StringArtefact {
+                    artefact_type: "url".to_string(),
+                    value: url_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    offset,
+                    length: end.saturating_sub(offset),
+                };
+                artefacts.push(artefact);
+            }
+        }
+
+        Ok(artefacts)
+    }
+
+    /// Read email artefacts from Parquet
+    fn read_email_artefacts(&self, path: &Path) -> Result<Vec<StringArtefact>> {
+        let file = File::open(path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+            .build()?;
+
+        let mut artefacts = Vec::new();
+
+        for batch_result in reader {
+            let batch = batch_result?;
+            
+            let email_col = batch.column_by_name("email")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let offset_col = batch.column_by_name("global_start")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+            let end_col = batch.column_by_name("global_end")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+
+            for i in 0..batch.num_rows() {
+                let offset = offset_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let end = end_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let artefact = StringArtefact {
+                    artefact_type: "email".to_string(),
+                    value: email_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    offset,
+                    length: end.saturating_sub(offset),
+                };
+                artefacts.push(artefact);
+            }
+        }
+
+        Ok(artefacts)
+    }
+
+    /// Read phone artefacts from Parquet
+    fn read_phone_artefacts(&self, path: &Path) -> Result<Vec<StringArtefact>> {
+        let file = File::open(path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+            .build()?;
+
+        let mut artefacts = Vec::new();
+
+        for batch_result in reader {
+            let batch = batch_result?;
+            
+            let phone_col = batch.column_by_name("phone")
+                .or_else(|| batch.column_by_name("number"))
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let offset_col = batch.column_by_name("global_start")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+            let end_col = batch.column_by_name("global_end")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+
+            for i in 0..batch.num_rows() {
+                let offset = offset_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let end = end_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let artefact = StringArtefact {
+                    artefact_type: "phone".to_string(),
+                    value: phone_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    offset,
+                    length: end.saturating_sub(offset),
+                };
+                artefacts.push(artefact);
+            }
+        }
+
+        Ok(artefacts)
+    }
+
+    /// Read legacy strings.parquet format
+    fn read_legacy_strings(&self, path: &Path) -> Result<Vec<StringArtefact>> {
+        let file = File::open(path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
             .build()?;
 
@@ -185,8 +314,8 @@ impl MetadataReader {
 
             for i in 0..batch.num_rows() {
                 let artefact = StringArtefact {
-                    artefact_type: type_col.and_then(|c| Some(c.value(i).to_string())).unwrap_or_default(),
-                    value: value_col.and_then(|c| Some(c.value(i).to_string())).unwrap_or_default(),
+                    artefact_type: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    value: value_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
                     offset: offset_col.map(|c| c.value(i)).unwrap_or(0),
                     length: length_col.map(|c| c.value(i)).unwrap_or(0),
                 };
