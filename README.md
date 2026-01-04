@@ -10,12 +10,13 @@ A pure Rust desktop application for forensic file recovery using [egui](https://
 ## Features
 
 - 📂 **Multi-format evidence support** - Raw images (.dd, .raw, .img), E01 format, and block devices
+- � **Raw device scanning** - Direct access to /dev/sdX, /dev/nvmeXnY devices with dropdown selection
 - 🔍 **Comprehensive file recovery** - Images, documents, archives, databases, media, and more
 - 🔗 **String/URL/Email extraction** - Find text patterns in evidence
 - 📊 **Real-time progress monitoring** - Live throughput, ETA, and statistics
 - 📁 **Result browsing** - Filter and search carved files
 - 💾 **Offline/Airgapped operation** - No network required for forensic integrity
-- 🚀 **GPU acceleration** - Optional OpenCL/CUDA support
+- 🚀 **GPU acceleration** - Optional OpenCL/CUDA support (3 binary variants)
 - 🎯 **Single binary** - No npm, no web stack, just `cargo build`
 
 ## Quick Start
@@ -84,23 +85,34 @@ The GUI automatically detects available variants and lets you choose which one t
 │                │                                             │
 │  ⚙ Configure   │  Scan Configuration                        │
 │  📊 Monitor    │  ┌──────────────────────────────────────┐  │
-│  📁 Results    │  │ Evidence File: [/path/to/image.dd]   │  │
-│                │  │ Output Dir:    [/output/carved]      │  │
-│  ▶ Start Scan  │  │                                      │  │
-│                │  │ File Types: ☑ jpeg ☑ png ☑ pdf...    │  │
-│  ● Idle        │  │ Metadata:   ◉ Parquet ○ JSONL ○ CSV  │  │
+│  📁 Results    │  │ Source: [📄 File] [💾 Device]        │  │
+│                │  │ Evidence: [/dev/sda ▼] or Browse...  │  │
+│  ▶ Start Scan  │  │ Output:   [/output/carved]           │  │
+│                │  │                                      │  │
+│  ● Idle        │  │ File Types: ☑ jpeg ☑ png ☑ pdf...    │  │
 │                │  └──────────────────────────────────────┘  │
 ├────────────────┴─────────────────────────────────────────────┤
-│  Ready                                swiftbeaver: v0.3.0    │
+│  Ready                       swiftbeaver: v0.3.0 (3 variants)│
 └──────────────────────────────────────────────────────────────┘
 ```
 
 ## Usage
 
-1. **Configure** - Set evidence file, output directory, and file types
+1. **Configure** - Select evidence source (file or raw device), output directory, and file types
 2. **Start Scan** - Click "▶ Start Scan" to begin carving
 3. **Monitor** - Watch real-time progress and logs
 4. **Browse Results** - View carved files and metadata
+
+### Raw Device Scanning
+
+To scan raw devices (requires root/sudo):
+
+1. Select **💾 Raw Device** as the source type
+2. Click **🔄 Refresh** to list available block devices
+3. Select the device from the dropdown (shows size and model)
+4. Optionally enable **Show partitions** to see individual partitions
+
+**Note:** Raw device access requires elevated privileges. Run with `sudo` for device scanning.
 
 ## Project Structure
 
@@ -111,6 +123,7 @@ SwiftBeaverLodge/
 │   ├── lib.rs            # Library exports
 │   ├── app.rs            # Main application state
 │   ├── config.rs         # Scan configuration types
+│   ├── devices.rs        # Block device detection
 │   ├── scan/             # Scan management
 │   │   ├── mod.rs        # Module exports
 │   │   ├── manager.rs    # Subprocess spawning
@@ -138,7 +151,8 @@ SwiftBeaverLodge/
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| Evidence File | Path to disk image or device | - |
+| Evidence Source | File/Image or Raw Device | File |
+| Evidence Path | Path to disk image or /dev/X device | - |
 | Output Directory | Where to save carved files | - |
 | File Types | Which file types to carve | Common types |
 | Metadata Format | parquet/jsonl/csv | parquet |

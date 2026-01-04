@@ -25,7 +25,8 @@ SwiftBeaverLodge/
 │   ├── main.rs           # Entry point, eframe setup
 │   ├── lib.rs            # Library exports for tests
 │   ├── app.rs            # Main application state & UI loop
-│   ├── config.rs         # ScanConfig, MetadataBackend
+│   ├── config.rs         # ScanConfig, MetadataBackend, GpuVariant
+│   ├── devices.rs        # Block device detection for raw device scanning
 │   ├── scan/
 │   │   ├── mod.rs        # ScanState, LogEntry, exports
 │   │   ├── manager.rs    # ScanManager - subprocess spawning
@@ -445,9 +446,10 @@ cargo clippy          # Lint
 - `ScanProgress` - Progress snapshot from swiftbeaver
 - `MetadataReader` - Reads Parquet/JSONL results
 - `GpuVariant` - GPU build variant (CpuOnly/OpenCL/Cuda)
+- `BlockDevice` - Block device info for raw device scanning
 - `CarvedFile` - Single carved file metadata
 - `Tab` - UI tab enum (Configure/Monitor/Results)
 
 ---
 
-*Last Updated: January 3, 2025*
+*Last Updated: January 4, 2026*

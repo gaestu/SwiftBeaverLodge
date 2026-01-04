@@ -4,13 +4,27 @@ use egui::{Ui, RichText, Color32};
 use rfd::FileDialog;
 
 use crate::config::{ScanConfig, MetadataBackend, GpuVariant, FILE_TYPES};
+use crate::devices::{list_block_devices, BlockDevice, DeviceType};
 use crate::scan::{get_available_variants, is_variant_available};
+
+/// Input source type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputSource {
+    File,
+    Device,
+}
 
 /// Configuration panel state
 pub struct ConfigPanel {
     /// Show advanced options
     #[allow(dead_code)]
     show_advanced: bool,
+    /// Current input source type
+    input_source: InputSource,
+    /// Cached list of block devices
+    cached_devices: Vec<BlockDevice>,
+    /// Whether to show partitions or just whole disks
+    show_partitions: bool,
 }
 
 impl Default for ConfigPanel {
@@ -23,7 +37,28 @@ impl ConfigPanel {
     pub fn new() -> Self {
         Self {
             show_advanced: false,
+            input_source: InputSource::File,
+            cached_devices: Vec::new(),
+            show_partitions: false,
         }
+    }
+    
+    /// Refresh the cached device list
+    fn refresh_devices(&mut self) {
+        self.cached_devices = list_block_devices();
+    }
+    
+    /// Get filtered devices based on show_partitions setting
+    fn get_filtered_devices(&self) -> Vec<&BlockDevice> {
+        self.cached_devices.iter()
+            .filter(|d| {
+                if self.show_partitions {
+                    true
+                } else {
+                    matches!(d.device_type, DeviceType::Disk | DeviceType::NVMe | DeviceType::Loop)
+                }
+            })
+            .collect()
     }
 
     /// Render the configuration panel
@@ -32,24 +67,117 @@ impl ConfigPanel {
             ui.heading("Scan Configuration");
             ui.add_space(10.0);
 
-            // Input file
+            // Evidence source selection
             ui.group(|ui| {
-                ui.label(RichText::new("Evidence File").strong());
+                ui.label(RichText::new("Evidence Source").strong());
+                
+                // Source type selector
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut config.input_path)
-                            .hint_text("Path to evidence file or device")
-                            .desired_width(400.0)
-                    );
-                    if ui.button("Browse...").clicked() {
-                        if let Some(path) = FileDialog::new()
-                            .add_filter("All Files", &["*"])
-                            .add_filter("Disk Images", &["dd", "raw", "img", "dmg", "e01", "E01"])
-                            .pick_file()
-                        {
-                            config.input_path = path.display().to_string();
-                        }
+                    ui.selectable_value(&mut self.input_source, InputSource::File, "📄 File/Image");
+                    ui.selectable_value(&mut self.input_source, InputSource::Device, "💾 Raw Device");
+                });
+                
+                ui.add_space(5.0);
+                
+                match self.input_source {
+                    InputSource::File => {
+                        // File input mode
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut config.input_path)
+                                    .hint_text("Path to evidence file (.dd, .raw, .e01, etc.)")
+                                    .desired_width(380.0)
+                            );
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = FileDialog::new()
+                                    .add_filter("All Files", &["*"])
+                                    .add_filter("Disk Images", &["dd", "raw", "img", "dmg", "e01", "E01"])
+                                    .pick_file()
+                                {
+                                    config.input_path = path.display().to_string();
+                                }
+                            }
+                        });
                     }
+                    InputSource::Device => {
+                        // Device selection mode
+                        ui.horizontal(|ui| {
+                            if ui.button("🔄 Refresh").clicked() {
+                                self.refresh_devices();
+                            }
+                            ui.checkbox(&mut self.show_partitions, "Show partitions");
+                        });
+                        
+                        // Initialize devices if empty
+                        if self.cached_devices.is_empty() {
+                            self.refresh_devices();
+                        }
+                        
+                        let filtered_devices = self.get_filtered_devices();
+                        
+                        if filtered_devices.is_empty() {
+                            ui.colored_label(Color32::YELLOW, "⚠ No block devices found");
+                            ui.label(RichText::new("Run as root/sudo to access devices").weak());
+                        } else {
+                            // Device dropdown
+                            let current_device: String = filtered_devices.iter()
+                                .find(|d| d.path.to_string_lossy() == config.input_path)
+                                .map(|d| d.display_name())
+                                .unwrap_or_else(|| "Select a device...".to_string());
+                            
+                            egui::ComboBox::from_id_salt("device_selector")
+                                .width(450.0)
+                                .selected_text(&current_device)
+                                .show_ui(ui, |ui| {
+                                    for device in &filtered_devices {
+                                        let icon = match device.device_type {
+                                            DeviceType::Disk | DeviceType::NVMe => "💿",
+                                            DeviceType::Partition | DeviceType::NVMePartition => "📁",
+                                            DeviceType::Loop => "🔄",
+                                            DeviceType::Other => "📦",
+                                        };
+                                        let label = format!("{} {}", icon, device.display_name());
+                                        let is_selected = device.path.to_string_lossy() == config.input_path;
+                                        
+                                        if ui.selectable_label(is_selected, &label).clicked() {
+                                            config.input_path = device.path.to_string_lossy().to_string();
+                                        }
+                                    }
+                                });
+                            
+                            // Show selected device info
+                            if let Some(device) = filtered_devices.iter()
+                                .find(|d| d.path.to_string_lossy() == config.input_path) 
+                            {
+                                ui.add_space(5.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("Selected:").weak());
+                                    ui.label(&device.path.to_string_lossy().to_string());
+                                    ui.label(RichText::new(format!("({})", device.size_display)).weak());
+                                    if device.removable {
+                                        ui.label(RichText::new("🔌 Removable").color(Color32::LIGHT_BLUE));
+                                    }
+                                });
+                            }
+                        }
+                        
+                        // Warning about permissions
+                        ui.add_space(5.0);
+                        ui.label(RichText::new("⚠ Raw device access requires root/sudo privileges").weak().color(Color32::YELLOW));
+                    }
+                }
+                
+                // Manual path entry (always available)
+                ui.add_space(5.0);
+                ui.collapsing("Manual path entry", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Path:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut config.input_path)
+                                .hint_text("/dev/sda or /path/to/image.dd")
+                                .desired_width(350.0)
+                        );
+                    });
                 });
             });
 

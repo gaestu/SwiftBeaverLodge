@@ -4,6 +4,7 @@
 
 mod app;
 mod config;
+mod devices;
 mod scan;
 mod metadata;
 mod ui;
