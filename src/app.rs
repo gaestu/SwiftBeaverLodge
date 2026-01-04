@@ -141,8 +141,8 @@ impl eframe::App for SwiftBeaverApp {
             ui.horizontal(|ui| {
                 ui.label(&self.status_message);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let version = crate::scan::get_fastcarve_version();
-                    ui.label(format!("fastcarve: {}", version));
+                    let version = crate::scan::get_swiftbeaver_version();
+                    ui.label(format!("swiftbeaver: {}", version));
                     ui.separator();
                     ui.label(format!("SwiftBeaverLodge v{}", env!("CARGO_PKG_VERSION")));
                 });

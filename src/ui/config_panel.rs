@@ -3,7 +3,8 @@
 use egui::{Ui, RichText, Color32};
 use rfd::FileDialog;
 
-use crate::config::{ScanConfig, MetadataBackend, FILE_TYPES};
+use crate::config::{ScanConfig, MetadataBackend, GpuVariant, FILE_TYPES};
+use crate::scan::get_swiftbeaver_variant;
 
 /// Configuration panel state
 pub struct ConfigPanel {
@@ -157,8 +158,58 @@ impl ConfigPanel {
             // Advanced options
             ui.collapsing("Advanced Options", |ui| {
                 ui.checkbox(&mut config.compute_evidence_hash, "Compute evidence SHA-256");
-                ui.checkbox(&mut config.gpu_enabled, "Enable GPU acceleration");
                 ui.checkbox(&mut config.disable_zip, "Disable ZIP archive scanning");
+                
+                ui.add_space(10.0);
+                
+                // GPU Acceleration section
+                ui.label(RichText::new("GPU Acceleration").strong());
+                
+                // Show installed variant
+                let installed_variant = get_swiftbeaver_variant();
+                let variant_text = match &installed_variant {
+                    Some(v) => format!("Installed: {}", v),
+                    None => "Variant unknown (run download-swiftbeaver.sh)".to_string(),
+                };
+                ui.label(RichText::new(&variant_text).weak().italics());
+                
+                // GPU variant selection (for download guidance)
+                ui.horizontal(|ui| {
+                    ui.label("GPU Variant:");
+                    egui::ComboBox::from_id_salt("gpu_variant")
+                        .selected_text(config.gpu_variant.display_name())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut config.gpu_variant, GpuVariant::CpuOnly, GpuVariant::CpuOnly.display_name());
+                            ui.selectable_value(&mut config.gpu_variant, GpuVariant::OpenCL, GpuVariant::OpenCL.display_name());
+                            ui.selectable_value(&mut config.gpu_variant, GpuVariant::Cuda, GpuVariant::Cuda.display_name());
+                        });
+                });
+                
+                // GPU enable checkbox (only if variant supports GPU)
+                let gpu_available = config.gpu_variant.supports_gpu();
+                ui.add_enabled_ui(gpu_available, |ui| {
+                    ui.checkbox(&mut config.gpu_enabled, "Enable GPU acceleration (--gpu)");
+                });
+                
+                if !gpu_available && config.gpu_enabled {
+                    config.gpu_enabled = false;
+                }
+                
+                if config.gpu_variant != GpuVariant::CpuOnly && !config.gpu_enabled {
+                    ui.label(RichText::new("ℹ GPU variant installed but GPU disabled").weak());
+                }
+                
+                // Mismatch warning
+                if let Some(ref installed) = installed_variant {
+                    let expected = config.gpu_variant.as_str();
+                    if installed != expected {
+                        ui.colored_label(
+                            Color32::YELLOW,
+                            format!("⚠ Mismatch: {} installed, {} selected. Run: ./download-swiftbeaver.sh {}", 
+                                installed, expected, expected)
+                        );
+                    }
+                }
                 
                 ui.add_space(10.0);
 

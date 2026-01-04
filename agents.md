@@ -16,7 +16,7 @@
 | Metadata | parquet + arrow |
 | Async | tokio |
 | File Dialogs | rfd |
-| Core Engine | fastcarve binary (subprocess) |
+| Core Engine | swiftbeaver binary (subprocess) |
 
 ### Project Structure
 ```
@@ -40,7 +40,7 @@ SwiftBeaverLodge/
 │       ├── progress_panel.rs
 │       └── results_panel.rs
 ├── bin/
-│   └── fastcarve         # Downloaded binary
+│   └── swiftbeaver       # Downloaded binary
 ├── tests/
 │   └── integration_tests.rs
 ├── Cargo.toml
@@ -53,24 +53,34 @@ SwiftBeaverLodge/
 
 ### Integration Method: Binary Subprocess
 
-SwiftBeaverLodge uses the **pre-built fastcarve binary** from [GitHub releases](https://github.com/gaestu/SwiftBeaver/releases):
+SwiftBeaverLodge uses the **pre-built swiftbeaver binary** from [GitHub releases](https://github.com/gaestu/SwiftBeaver/releases):
 
-- **Stable releases** - Pinned to tested versions (v0.2.1)
+- **Stable releases** - Pinned to tested versions (v0.3.0)
+- **GPU variants** - CPU-only, OpenCL, or CUDA builds
 - **Faster builds** - No libewf/GPU SDK required at build time
 - **Cross-platform** - Pre-built binaries per platform
+
+### GPU Variants (v0.3.0+)
+
+| Variant | Description | Use Case |
+|---------|-------------|----------|
+| `cpu-only` | No GPU dependencies | Maximum compatibility |
+| `opencl` | OpenCL GPU support | NVIDIA/AMD/Intel GPUs |
+| `cuda` | CUDA GPU support | Best NVIDIA performance |
 
 ### Binary Location
 
 ```
 SwiftBeaverLodge/
 ├── bin/
-│   └── fastcarve          # Downloaded binary
-└── download-fastcarve.sh  # Script to download binary
+│   ├── swiftbeaver        # Downloaded binary
+│   └── .variant           # GPU variant indicator
+└── download-swiftbeaver.sh  # Script to download binary
 ```
 
 ### Key Integration Points
 
-1. **Subprocess Execution** - Spawn fastcarve with CLI arguments:
+1. **Subprocess Execution** - Spawn swiftbeaver with CLI arguments:
    ```rust
    Command::new(&binary_path)
        .args(&[
@@ -87,7 +97,7 @@ SwiftBeaverLodge/
 
 2. **Progress Parsing** - Parse JSON log output from stdout:
    ```rust
-   // fastcarve with --log-format json emits:
+   // swiftbeaver with --log-format json emits:
    // {"timestamp":"...","level":"INFO","message":"progress bytes_scanned=1234 ..."}
    
    fn parse_json_log(line: &str) -> Option<(String, Value)>
@@ -405,14 +415,17 @@ cargo clippy          # Lint
 
 ### Binary Download
 ```bash
-./download-fastcarve.sh  # Downloads to bin/fastcarve
+./download-swiftbeaver.sh           # CPU-only (default)
+./download-swiftbeaver.sh opencl    # OpenCL GPU support
+./download-swiftbeaver.sh cuda      # CUDA GPU support
 ```
 
 ### Key Types
 - `ScanConfig` - Configuration for a scan
 - `ScanManager` - Manages subprocess lifecycle
-- `ScanProgress` - Progress snapshot from fastcarve
+- `ScanProgress` - Progress snapshot from swiftbeaver
 - `MetadataReader` - Reads Parquet/JSONL results
+- `GpuVariant` - GPU build variant (CpuOnly/OpenCL/Cuda)
 - `CarvedFile` - Single carved file metadata
 - `Tab` - UI tab enum (Configure/Monitor/Results)
 

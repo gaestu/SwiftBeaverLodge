@@ -3,18 +3,18 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-/// Test that fastcarve binary is findable
+/// Test that swiftbeaver binary is findable
 #[test]
-fn test_fastcarve_binary_discovery() {
-    // Try to find fastcarve in various locations
+fn test_swiftbeaver_binary_discovery() {
+    // Try to find swiftbeaver in various locations
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()));
     
     let possible_paths = [
-        "bin/fastcarve",
-        "./bin/fastcarve",
-        "../bin/fastcarve",
+        "bin/swiftbeaver",
+        "./bin/swiftbeaver",
+        "../bin/swiftbeaver",
     ];
     
     let mut found = false;
@@ -27,14 +27,14 @@ fn test_fastcarve_binary_discovery() {
     
     // Also check PATH
     if !found {
-        found = which::which("fastcarve").is_ok();
+        found = which::which("swiftbeaver").is_ok();
     }
     
     // This test doesn't fail - it just reports the status
     if found {
-        println!("fastcarve binary found");
+        println!("swiftbeaver binary found");
     } else {
-        println!("fastcarve binary not found - download from GitHub releases");
+        println!("swiftbeaver binary not found - download from GitHub releases");
     }
 }
 

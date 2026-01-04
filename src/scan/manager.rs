@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use chrono::Utc;
 
 use crate::config::ScanConfig;
-use super::{ScanState, ScanProgress, LogEntry, find_fastcarve_binary, progress::parse_json_log};
+use super::{ScanState, ScanProgress, LogEntry, find_swiftbeaver_binary, progress::parse_json_log};
 
 /// Messages from scan thread to UI
 #[derive(Debug, Clone)]
@@ -18,7 +18,7 @@ pub enum ScanMessage {
     Log(LogEntry),
     StateChange(ScanState),
     Error(String),
-    /// Run output path from fastcarve's "starting" log
+    /// Run output path from swiftbeaver's "starting" log
     RunOutputPath { run_id: String, output_path: String },
 }
 
@@ -99,7 +99,7 @@ impl ScanManager {
                         self.error = Some(e);
                     }
                     ScanMessage::RunOutputPath { run_id, output_path } => {
-                        // Update to the actual path from fastcarve
+                        // Update to the actual path from swiftbeaver
                         self.run_id = Some(run_id);
                         self.run_output_path = Some(output_path);
                     }
@@ -124,8 +124,8 @@ impl ScanManager {
         }
 
         // Find binary
-        let binary_path = find_fastcarve_binary()
-            .context("fastcarve binary not found. Run download-fastcarve.sh or add to PATH")?;
+        let binary_path = find_swiftbeaver_binary()
+            .context("swiftbeaver binary not found. Run download-swiftbeaver.sh or add to PATH")?;
 
         // Validate paths
         if !PathBuf::from(&config.input_path).exists() {
@@ -139,7 +139,7 @@ impl ScanManager {
         let (message_tx, message_rx) = channel::<ScanMessage>();
         let (cancel_tx, cancel_rx) = channel::<()>();
 
-        // Reset state (run_id and run_output_path will be set from fastcarve's "starting" log)
+        // Reset state (run_id and run_output_path will be set from swiftbeaver's "starting" log)
         self.state = ScanState::Running;
         self.run_id = None;
         self.run_output_path = None;
@@ -152,7 +152,7 @@ impl ScanManager {
         // Build command arguments
         let args = build_cli_args(&config);
 
-        tracing::info!("Starting fastcarve: {} {}", binary_path.display(), args.join(" "));
+        tracing::info!("Starting swiftbeaver: {} {}", binary_path.display(), args.join(" "));
         
         self.logs.push(LogEntry {
             timestamp: Utc::now().to_rfc3339(),
@@ -206,7 +206,7 @@ fn run_scan_thread(
     let mut child = match child_result {
         Ok(c) => c,
         Err(e) => {
-            let _ = message_tx.send(ScanMessage::Error(format!("Failed to spawn fastcarve: {}", e)));
+            let _ = message_tx.send(ScanMessage::Error(format!("Failed to spawn swiftbeaver: {}", e)));
             let _ = message_tx.send(ScanMessage::StateChange(ScanState::Failed));
             return;
         }

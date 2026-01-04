@@ -2,6 +2,40 @@
 
 use serde::{Deserialize, Serialize};
 
+/// GPU variant for swiftbeaver binary
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum GpuVariant {
+    /// CPU-only build, no GPU support
+    #[default]
+    CpuOnly,
+    /// OpenCL GPU support (NVIDIA/AMD/Intel)
+    OpenCL,
+    /// CUDA GPU support (NVIDIA only, best performance)
+    Cuda,
+}
+
+impl GpuVariant {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GpuVariant::CpuOnly => "cpu-only",
+            GpuVariant::OpenCL => "opencl",
+            GpuVariant::Cuda => "cuda",
+        }
+    }
+    
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            GpuVariant::CpuOnly => "CPU Only",
+            GpuVariant::OpenCL => "OpenCL (NVIDIA/AMD/Intel)",
+            GpuVariant::Cuda => "CUDA (NVIDIA)",
+        }
+    }
+    
+    pub fn supports_gpu(&self) -> bool {
+        matches!(self, GpuVariant::OpenCL | GpuVariant::Cuda)
+    }
+}
+
 /// Scan configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanConfig {
@@ -25,6 +59,7 @@ pub struct ScanConfig {
 
     // GPU acceleration
     pub gpu_enabled: bool,
+    pub gpu_variant: GpuVariant,
 
     // Entropy detection
     pub scan_entropy: bool,
@@ -64,6 +99,7 @@ impl Default for ScanConfig {
             scan_utf16: false,
             string_min_len: 8,
             gpu_enabled: false,
+            gpu_variant: GpuVariant::default(),
             scan_entropy: false,
             entropy_threshold: 7.5,
             scan_sqlite_pages: false,
@@ -130,5 +166,15 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: ScanConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.scan_strings, config.scan_strings);
+    }
+    
+    #[test]
+    fn test_gpu_variant() {
+        assert_eq!(GpuVariant::CpuOnly.as_str(), "cpu-only");
+        assert_eq!(GpuVariant::OpenCL.as_str(), "opencl");
+        assert_eq!(GpuVariant::Cuda.as_str(), "cuda");
+        assert!(!GpuVariant::CpuOnly.supports_gpu());
+        assert!(GpuVariant::OpenCL.supports_gpu());
+        assert!(GpuVariant::Cuda.supports_gpu());
     }
 }

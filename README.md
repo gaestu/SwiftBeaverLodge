@@ -23,7 +23,7 @@ A pure Rust desktop application for forensic file recovery using [egui](https://
 ### Prerequisites
 
 1. **Rust 1.70+** - Install from [rustup.rs](https://rustup.rs)
-2. **fastcarve binary** - Download from [SwiftBeaver releases](https://github.com/gaestu/SwiftBeaver/releases)
+2. **swiftbeaver binary** - Download from [SwiftBeaver releases](https://github.com/gaestu/SwiftBeaver/releases)
 
 ### Linux System Dependencies
 
@@ -48,14 +48,31 @@ sudo apt install libgtk-3-dev libglib2.0-dev libpango1.0-dev \
 git clone https://github.com/yourusername/SwiftBeaverLodge.git
 cd SwiftBeaverLodge
 
-# Download fastcarve binary (Linux)
-./download-fastcarve.sh
+# Download swiftbeaver binary (choose your GPU variant)
+./download-swiftbeaver.sh              # CPU-only (default)
+./download-swiftbeaver.sh opencl       # OpenCL GPU support
+./download-swiftbeaver.sh cuda         # CUDA GPU support (NVIDIA)
 
 # Build
 cargo build --release
 
 # Run
 ./target/release/swiftbeaverlodge
+```
+
+## GPU Variants
+
+SwiftBeaver v0.3.0 offers three binary variants:
+
+| Variant | Description | Use Case |
+|---------|-------------|----------|
+| `cpu-only` | No GPU dependencies | Maximum compatibility |
+| `opencl` | OpenCL GPU support | NVIDIA/AMD/Intel GPUs |
+| `cuda` | CUDA GPU support | Best NVIDIA performance |
+
+To switch variants, re-run the download script:
+```bash
+./download-swiftbeaver.sh cuda  # Switch to CUDA variant
 ```
 
 ## Screenshot
@@ -74,7 +91,7 @@ cargo build --release
 │  ● Idle        │  │ Metadata:   ◉ Parquet ○ JSONL ○ CSV  │  │
 │                │  └──────────────────────────────────────┘  │
 ├────────────────┴─────────────────────────────────────────────┤
-│  Ready                                  fastcarve: v0.2.1    │
+│  Ready                                swiftbeaver: v0.3.0    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -108,7 +125,7 @@ SwiftBeaverLodge/
 │       ├── progress_panel.rs
 │       └── results_panel.rs
 ├── bin/
-│   └── fastcarve         # Downloaded binary
+│   └── swiftbeaver       # Downloaded binary
 ├── tests/
 │   └── integration_tests.rs
 ├── Cargo.toml
@@ -125,6 +142,7 @@ SwiftBeaverLodge/
 | Metadata Format | parquet/jsonl/csv | parquet |
 | String Scanning | Extract URLs/emails/phones | enabled |
 | GPU Acceleration | Use GPU for faster scanning | disabled |
+| GPU Variant | cpu-only/opencl/cuda | cpu-only |
 | Evidence Hash | Compute SHA-256 of evidence | enabled |
 
 ## Tests
