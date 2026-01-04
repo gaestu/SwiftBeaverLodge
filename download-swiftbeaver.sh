@@ -1,31 +1,12 @@
 #!/bin/bash
-# Download swiftbeaver binary from SwiftBeaver releases
-# Supports multiple GPU variants: cpu-only, opencl, cuda
+# Download swiftbeaver binaries from SwiftBeaver releases
+# Downloads all GPU variants: cpu-only, opencl, cuda
 
 set -e
 
 VERSION="v0.3.0"
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
-
-# Default variant (can be overridden via argument)
-VARIANT="${1:-cpu-only}"
-
-# Validate variant
-case "$VARIANT" in
-    cpu-only|opencl|cuda)
-        ;;
-    *)
-        echo "Invalid variant: $VARIANT"
-        echo "Usage: $0 [cpu-only|opencl|cuda]"
-        echo ""
-        echo "Available variants:"
-        echo "  cpu-only  - CPU-only build, no GPU support (default)"
-        echo "  opencl    - OpenCL GPU support (NVIDIA/AMD/Intel)"
-        echo "  cuda      - CUDA GPU support (NVIDIA only, best performance)"
-        exit 1
-        ;;
-esac
 
 # Map architecture
 case "$ARCH" in
@@ -55,70 +36,104 @@ case "$OS" in
         ;;
 esac
 
-# GitHub release format: swiftbeaver-linux-x86_64-<variant>.tar.gz
-FILENAME="swiftbeaver-${OS_NAME}-${ARCH}-${VARIANT}.tar.gz"
-URL="https://github.com/gaestu/SwiftBeaver/releases/download/${VERSION}/${FILENAME}"
+# All variants to download
+VARIANTS=("cpu-only" "opencl" "cuda")
+
+# Check if user wants only specific variant
+if [ -n "$1" ]; then
+    case "$1" in
+        cpu-only|opencl|cuda)
+            VARIANTS=("$1")
+            ;;
+        all)
+            # Keep all variants
+            ;;
+        *)
+            echo "Invalid variant: $1"
+            echo "Usage: $0 [cpu-only|opencl|cuda|all]"
+            echo ""
+            echo "Available variants:"
+            echo "  cpu-only  - CPU-only build, no GPU support"
+            echo "  opencl    - OpenCL GPU support (NVIDIA/AMD/Intel)"
+            echo "  cuda      - CUDA GPU support (NVIDIA only, best performance)"
+            echo "  all       - Download all variants (default)"
+            exit 1
+            ;;
+    esac
+fi
 
 echo "╔════════════════════════════════════════════════════════╗"
 echo "║           SwiftBeaver Binary Downloader                ║"
 echo "╠════════════════════════════════════════════════════════╣"
 echo "║  Version:  ${VERSION}                                       ║"
-echo "║  Variant:  ${VARIANT}$(printf '%*s' $((15 - ${#VARIANT})) '')                            ║"
 echo "║  Platform: ${OS_NAME}-${ARCH}$(printf '%*s' $((10 - ${#OS_NAME})) '')                        ║"
+echo "║  Variants: ${VARIANTS[*]}$(printf '%*s' $((24 - ${#VARIANTS[*]})) '')              ║"
 echo "╚════════════════════════════════════════════════════════╝"
-echo ""
-echo "URL: ${URL}"
 echo ""
 
 # Create bin directory
 mkdir -p bin
 
-# Download
-echo "📥 Downloading..."
-if command -v curl &> /dev/null; then
-    curl -L -o /tmp/${FILENAME} "${URL}"
-elif command -v wget &> /dev/null; then
-    wget -O /tmp/${FILENAME} "${URL}"
-else
-    echo "Neither curl nor wget found. Please install one of them."
-    exit 1
+# Download each variant
+for VARIANT in "${VARIANTS[@]}"; do
+    FILENAME="swiftbeaver-${OS_NAME}-${ARCH}-${VARIANT}.tar.gz"
+    URL="https://github.com/gaestu/SwiftBeaver/releases/download/${VERSION}/${FILENAME}"
+    BINARY_NAME="swiftbeaver-${VARIANT}"
+    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "📥 Downloading ${VARIANT} variant..."
+    echo "   URL: ${URL}"
+    
+    # Download
+    if command -v curl &> /dev/null; then
+        curl -L -o /tmp/${FILENAME} "${URL}" 2>&1
+    elif command -v wget &> /dev/null; then
+        wget -O /tmp/${FILENAME} "${URL}" 2>&1
+    else
+        echo "Neither curl nor wget found. Please install one of them."
+        exit 1
+    fi
+    
+    # Extract to temp, then rename
+    echo "📦 Extracting..."
+    tar -xzf /tmp/${FILENAME} -C /tmp/
+    mv /tmp/swiftbeaver bin/${BINARY_NAME}
+    chmod +x bin/${BINARY_NAME}
+    
+    # Verify
+    echo "✅ Verifying ${BINARY_NAME}..."
+    ./bin/${BINARY_NAME} --version
+    
+    # Cleanup
+    rm -f /tmp/${FILENAME}
+    echo ""
+done
+
+# Create default symlink to cpu-only (safest default)
+if [ -f "bin/swiftbeaver-cpu-only" ]; then
+    ln -sf swiftbeaver-cpu-only bin/swiftbeaver
+    echo "🔗 Created symlink: swiftbeaver → swiftbeaver-cpu-only"
 fi
 
-# Extract
-echo "📦 Extracting..."
-tar -xzf /tmp/${FILENAME} -C bin/
-
-# Make executable
-chmod +x bin/swiftbeaver
-
-# Store variant info
-echo "${VARIANT}" > bin/.variant
-
-# Verify
-echo "✅ Verifying..."
-./bin/swiftbeaver --version
-
+# List installed variants
 echo ""
 echo "╔════════════════════════════════════════════════════════╗"
-echo "║  ✅ swiftbeaver ${VERSION} (${VARIANT}) installed!              ║"
+echo "║  ✅ Installation Complete!                             ║"
+echo "╠════════════════════════════════════════════════════════╣"
+echo "║  Installed binaries:                                   ║"
+for VARIANT in "${VARIANTS[@]}"; do
+    printf "║    • bin/swiftbeaver-%-10s                       ║\n" "${VARIANT}"
+done
 echo "║                                                        ║"
-echo "║  Binary location: bin/swiftbeaver                      ║"
+echo "║  Select variant in SwiftBeaverLodge UI or run:         ║"
+echo "║    ./bin/swiftbeaver-<variant> --version               ║"
 echo "║                                                        ║"
 echo "║  You can now run: cargo run                            ║"
 echo "╚════════════════════════════════════════════════════════╝"
 
-# Cleanup
-rm -f /tmp/${FILENAME}
-
 # GPU-specific hints
-if [ "$VARIANT" == "opencl" ]; then
-    echo ""
-    echo "💡 OpenCL variant requires:"
-    echo "   - OpenCL runtime installed (ocl-icd-opencl-dev)"
-    echo "   - Use --gpu flag to enable GPU acceleration"
-elif [ "$VARIANT" == "cuda" ]; then
-    echo ""
-    echo "💡 CUDA variant requires:"
-    echo "   - NVIDIA GPU with CUDA 12.x"
-    echo "   - Use --gpu flag to enable GPU acceleration"
-fi
+echo ""
+echo "💡 GPU Requirements:"
+echo "   • opencl: Install OpenCL runtime (ocl-icd-opencl-dev)"
+echo "   • cuda:   NVIDIA GPU with CUDA 12.x runtime"
+echo "   Use --gpu flag to enable GPU acceleration"

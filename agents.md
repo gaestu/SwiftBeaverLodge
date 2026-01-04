@@ -40,7 +40,9 @@ SwiftBeaverLodge/
 │       ├── progress_panel.rs
 │       └── results_panel.rs
 ├── bin/
-│   └── swiftbeaver       # Downloaded binary
+│   ├── swiftbeaver-cpu-only   # CPU-only variant
+│   ├── swiftbeaver-opencl     # OpenCL GPU variant
+│   └── swiftbeaver-cuda       # CUDA GPU variant
 ├── tests/
 │   └── integration_tests.rs
 ├── Cargo.toml
@@ -70,12 +72,28 @@ SwiftBeaverLodge uses the **pre-built swiftbeaver binary** from [GitHub releases
 
 ### Binary Location
 
+All GPU variants are downloaded by default. Users select which variant to use in the UI:
+
 ```
 SwiftBeaverLodge/
 ├── bin/
-│   ├── swiftbeaver        # Downloaded binary
-│   └── .variant           # GPU variant indicator
-└── download-swiftbeaver.sh  # Script to download binary
+│   ├── swiftbeaver-cpu-only   # CPU-only variant (default)
+│   ├── swiftbeaver-opencl     # OpenCL GPU variant
+│   └── swiftbeaver-cuda       # CUDA GPU variant
+└── download-swiftbeaver.sh    # Script to download binaries
+```
+
+### Binary Discovery
+
+The application automatically detects available variants:
+```rust
+// Find binary for specific variant
+find_swiftbeaver_binary_for_variant(GpuVariant::Cuda)
+// → bin/swiftbeaver-cuda
+
+// Get list of available variants
+get_available_variants() 
+// → [CpuOnly, OpenCL, Cuda]
 ```
 
 ### Key Integration Points
@@ -415,9 +433,10 @@ cargo clippy          # Lint
 
 ### Binary Download
 ```bash
-./download-swiftbeaver.sh           # CPU-only (default)
-./download-swiftbeaver.sh opencl    # OpenCL GPU support
-./download-swiftbeaver.sh cuda      # CUDA GPU support
+./download-swiftbeaver.sh           # Download all variants (default)
+./download-swiftbeaver.sh cpu-only  # CPU-only only
+./download-swiftbeaver.sh opencl    # OpenCL only
+./download-swiftbeaver.sh cuda      # CUDA only
 ```
 
 ### Key Types

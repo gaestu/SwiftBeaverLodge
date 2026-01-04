@@ -48,10 +48,13 @@ sudo apt install libgtk-3-dev libglib2.0-dev libpango1.0-dev \
 git clone https://github.com/yourusername/SwiftBeaverLodge.git
 cd SwiftBeaverLodge
 
-# Download swiftbeaver binary (choose your GPU variant)
-./download-swiftbeaver.sh              # CPU-only (default)
-./download-swiftbeaver.sh opencl       # OpenCL GPU support
-./download-swiftbeaver.sh cuda         # CUDA GPU support (NVIDIA)
+# Download all swiftbeaver variants (recommended)
+./download-swiftbeaver.sh              # Downloads all: cpu-only, opencl, cuda
+
+# Or download specific variant only
+./download-swiftbeaver.sh cpu-only     # CPU-only variant
+./download-swiftbeaver.sh opencl       # OpenCL variant
+./download-swiftbeaver.sh cuda         # CUDA variant
 
 # Build
 cargo build --release
@@ -62,18 +65,15 @@ cargo build --release
 
 ## GPU Variants
 
-SwiftBeaver v0.3.0 offers three binary variants:
+SwiftBeaver v0.3.0 offers three binary variants. **All variants are downloaded by default** and you can select which one to use in the UI:
 
-| Variant | Description | Use Case |
-|---------|-------------|----------|
-| `cpu-only` | No GPU dependencies | Maximum compatibility |
-| `opencl` | OpenCL GPU support | NVIDIA/AMD/Intel GPUs |
-| `cuda` | CUDA GPU support | Best NVIDIA performance |
+| Variant | Binary Name | Description | Use Case |
+|---------|-------------|-------------|----------|
+| `cpu-only` | `swiftbeaver-cpu-only` | No GPU dependencies | Maximum compatibility |
+| `opencl` | `swiftbeaver-opencl` | OpenCL GPU support | NVIDIA/AMD/Intel GPUs |
+| `cuda` | `swiftbeaver-cuda` | CUDA GPU support | Best NVIDIA performance |
 
-To switch variants, re-run the download script:
-```bash
-./download-swiftbeaver.sh cuda  # Switch to CUDA variant
-```
+The GUI automatically detects available variants and lets you choose which one to run. Select the variant in **Configure → Advanced Options → GPU Variant**.
 
 ## Screenshot
 
@@ -125,7 +125,9 @@ SwiftBeaverLodge/
 │       ├── progress_panel.rs
 │       └── results_panel.rs
 ├── bin/
-│   └── swiftbeaver       # Downloaded binary
+│   ├── swiftbeaver-cpu-only   # CPU-only variant
+│   ├── swiftbeaver-opencl     # OpenCL GPU variant
+│   └── swiftbeaver-cuda       # CUDA GPU variant
 ├── tests/
 │   └── integration_tests.rs
 ├── Cargo.toml

@@ -141,8 +141,10 @@ impl eframe::App for SwiftBeaverApp {
             ui.horizontal(|ui| {
                 ui.label(&self.status_message);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Show available variants count
+                    let available = crate::scan::get_available_variants();
                     let version = crate::scan::get_swiftbeaver_version();
-                    ui.label(format!("swiftbeaver: {}", version));
+                    ui.label(format!("swiftbeaver: {} ({} variants)", version, available.len()));
                     ui.separator();
                     ui.label(format!("SwiftBeaverLodge v{}", env!("CARGO_PKG_VERSION")));
                 });

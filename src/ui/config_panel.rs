@@ -4,7 +4,7 @@ use egui::{Ui, RichText, Color32};
 use rfd::FileDialog;
 
 use crate::config::{ScanConfig, MetadataBackend, GpuVariant, FILE_TYPES};
-use crate::scan::get_swiftbeaver_variant;
+use crate::scan::{get_available_variants, is_variant_available};
 
 /// Configuration panel state
 pub struct ConfigPanel {
@@ -163,52 +163,70 @@ impl ConfigPanel {
                 ui.add_space(10.0);
                 
                 // GPU Acceleration section
-                ui.label(RichText::new("GPU Acceleration").strong());
+                ui.label(RichText::new("GPU Variant").strong());
                 
-                // Show installed variant
-                let installed_variant = get_swiftbeaver_variant();
-                let variant_text = match &installed_variant {
-                    Some(v) => format!("Installed: {}", v),
-                    None => "Variant unknown (run download-swiftbeaver.sh)".to_string(),
-                };
-                ui.label(RichText::new(&variant_text).weak().italics());
+                // Get available variants
+                let available_variants = get_available_variants();
                 
-                // GPU variant selection (for download guidance)
+                // Show available variants status
+                if available_variants.is_empty() {
+                    ui.colored_label(Color32::RED, "⚠ No swiftbeaver binaries found!");
+                    ui.label(RichText::new("Run: ./download-swiftbeaver.sh").weak());
+                } else {
+                    let variant_names: Vec<&str> = available_variants.iter()
+                        .map(|v| v.as_str())
+                        .collect();
+                    ui.label(RichText::new(format!("Available: {}", variant_names.join(", "))).weak());
+                }
+                
+                // GPU variant selection
                 ui.horizontal(|ui| {
-                    ui.label("GPU Variant:");
+                    ui.label("Use variant:");
                     egui::ComboBox::from_id_salt("gpu_variant")
                         .selected_text(config.gpu_variant.display_name())
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut config.gpu_variant, GpuVariant::CpuOnly, GpuVariant::CpuOnly.display_name());
-                            ui.selectable_value(&mut config.gpu_variant, GpuVariant::OpenCL, GpuVariant::OpenCL.display_name());
-                            ui.selectable_value(&mut config.gpu_variant, GpuVariant::Cuda, GpuVariant::Cuda.display_name());
+                            for variant in [GpuVariant::CpuOnly, GpuVariant::OpenCL, GpuVariant::Cuda] {
+                                let available = is_variant_available(variant);
+                                let label = if available {
+                                    format!("✓ {}", variant.display_name())
+                                } else {
+                                    format!("✗ {} (not installed)", variant.display_name())
+                                };
+                                
+                                // Only allow selection if available
+                                let response = ui.selectable_value(&mut config.gpu_variant, variant, &label);
+                                if !available && response.clicked() {
+                                    // Revert to previous if not available
+                                    config.gpu_variant = available_variants.first()
+                                        .copied()
+                                        .unwrap_or(GpuVariant::CpuOnly);
+                                }
+                            }
                         });
                 });
                 
+                // Warn if selected variant is not available
+                if !is_variant_available(config.gpu_variant) {
+                    ui.colored_label(
+                        Color32::YELLOW,
+                        format!("⚠ {} not installed. Run: ./download-swiftbeaver.sh {}", 
+                            config.gpu_variant.as_str(),
+                            config.gpu_variant.as_str())
+                    );
+                }
+                
                 // GPU enable checkbox (only if variant supports GPU)
-                let gpu_available = config.gpu_variant.supports_gpu();
+                let gpu_available = config.gpu_variant.supports_gpu() && is_variant_available(config.gpu_variant);
                 ui.add_enabled_ui(gpu_available, |ui| {
                     ui.checkbox(&mut config.gpu_enabled, "Enable GPU acceleration (--gpu)");
                 });
                 
-                if !gpu_available && config.gpu_enabled {
+                if !config.gpu_variant.supports_gpu() && config.gpu_enabled {
                     config.gpu_enabled = false;
                 }
                 
-                if config.gpu_variant != GpuVariant::CpuOnly && !config.gpu_enabled {
-                    ui.label(RichText::new("ℹ GPU variant installed but GPU disabled").weak());
-                }
-                
-                // Mismatch warning
-                if let Some(ref installed) = installed_variant {
-                    let expected = config.gpu_variant.as_str();
-                    if installed != expected {
-                        ui.colored_label(
-                            Color32::YELLOW,
-                            format!("⚠ Mismatch: {} installed, {} selected. Run: ./download-swiftbeaver.sh {}", 
-                                installed, expected, expected)
-                        );
-                    }
+                if config.gpu_variant.supports_gpu() && is_variant_available(config.gpu_variant) && !config.gpu_enabled {
+                    ui.label(RichText::new("ℹ GPU variant selected but GPU disabled").weak());
                 }
                 
                 ui.add_space(10.0);

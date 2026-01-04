@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use chrono::Utc;
 
 use crate::config::ScanConfig;
-use super::{ScanState, ScanProgress, LogEntry, find_swiftbeaver_binary, progress::parse_json_log};
+use super::{ScanState, ScanProgress, LogEntry, find_swiftbeaver_binary_for_variant, progress::parse_json_log};
 
 /// Messages from scan thread to UI
 #[derive(Debug, Clone)]
@@ -123,9 +123,13 @@ impl ScanManager {
             bail!("Scan already in progress");
         }
 
-        // Find binary
-        let binary_path = find_swiftbeaver_binary()
-            .context("swiftbeaver binary not found. Run download-swiftbeaver.sh or add to PATH")?;
+        // Find binary for selected GPU variant
+        let binary_path = find_swiftbeaver_binary_for_variant(config.gpu_variant)
+            .with_context(|| format!(
+                "swiftbeaver-{} binary not found. Run: ./download-swiftbeaver.sh {}",
+                config.gpu_variant.as_str(),
+                config.gpu_variant.as_str()
+            ))?;
 
         // Validate paths
         if !PathBuf::from(&config.input_path).exists() {
