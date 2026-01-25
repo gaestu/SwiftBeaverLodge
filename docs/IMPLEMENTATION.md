@@ -938,7 +938,7 @@ npm run tauri build -- --target x86_64-pc-windows-msvc
 
 3. **GPU on Windows**: OpenCL/CUDA driver requirements for Windows users.
 
-4. **Licensing**: Confirm MIT license compatibility for GUI distribution.
+4. **Licensing**: Confirm Apache 2.0 license compatibility for GUI distribution.
 
 ---
 

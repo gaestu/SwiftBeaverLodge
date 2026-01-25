@@ -4,7 +4,7 @@
 
 A pure Rust desktop application for forensic file recovery using [egui](https://github.com/emilk/egui). Provides a user-friendly interface for the [SwiftBeaver](https://github.com/gaestu/SwiftBeaver) file carving engine.
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![License](https://img.shields.io/badge/license-Apache-2.0-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)
 
 ## Features
@@ -181,7 +181,7 @@ cargo test -- --nocapture
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+Apache License 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
