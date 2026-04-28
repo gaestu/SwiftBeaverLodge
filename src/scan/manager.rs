@@ -8,10 +8,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 
-use super::{
-    find_swiftbeaver_binary_for_variant, progress::parse_json_log, LogEntry, ScanProgress,
-    ScanState,
-};
+use super::{discover_swiftbeaver, progress::parse_json_log, LogEntry, ScanProgress, ScanState};
 use crate::config::ScanConfig;
 
 /// Messages from scan thread to UI
@@ -102,6 +99,13 @@ impl ScanManager {
                         }
                     }
                     ScanMessage::Error(e) => {
+                        // Push to logs so the Monitor tab shows the message,
+                        // and retain in self.error for callers that inspect it.
+                        self.logs.push(LogEntry {
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            level: "ERROR".to_string(),
+                            message: e.clone(),
+                        });
                         self.error = Some(e);
                     }
                     ScanMessage::RunOutputPath {
@@ -140,16 +144,6 @@ impl ScanManager {
             bail!("Invalid scan configuration: {}", combo_issues.join("; "));
         }
 
-        // Find binary for selected GPU variant
-        let binary_path =
-            find_swiftbeaver_binary_for_variant(config.gpu_variant).with_context(|| {
-                format!(
-                    "swiftbeaver-{} binary not found. Run: ./download-swiftbeaver.sh {}",
-                    config.gpu_variant.as_str(),
-                    config.gpu_variant.as_str()
-                )
-            })?;
-
         // Validate paths
         if !PathBuf::from(&config.input_path).exists() {
             bail!("Input file does not exist: {}", config.input_path);
@@ -175,12 +169,6 @@ impl ScanManager {
         // Build command arguments
         let args = build_cli_args(&config);
 
-        tracing::info!(
-            "Starting swiftbeaver: {} {}",
-            binary_path.display(),
-            args.join(" ")
-        );
-
         self.logs.push(LogEntry {
             timestamp: Utc::now().to_rfc3339(),
             level: "INFO".to_string(),
@@ -189,7 +177,7 @@ impl ScanManager {
 
         // Spawn scan thread (non-blocking!)
         std::thread::spawn(move || {
-            run_scan_thread(binary_path, args, message_tx, cancel_rx);
+            run_scan_thread(args, message_tx, cancel_rx);
         });
 
         Ok(())
@@ -217,12 +205,34 @@ impl Default for ScanManager {
 }
 
 /// Run the scan in a background thread - completely non-blocking to UI
-fn run_scan_thread(
-    binary_path: PathBuf,
-    args: Vec<String>,
-    message_tx: Sender<ScanMessage>,
-    cancel_rx: Receiver<()>,
-) {
+fn run_scan_thread(args: Vec<String>, message_tx: Sender<ScanMessage>, cancel_rx: Receiver<()>) {
+    let discovered = match discover_swiftbeaver().with_context(|| {
+        "swiftbeaver binary not found. Install SwiftBeaver v0.5.1+ on PATH, \
+         or place the `swiftbeaver` binary in <exe_dir>/bin/ or ./bin/."
+            .to_string()
+    }) {
+        Ok(discovered) => discovered,
+        Err(err) => {
+            let _ = message_tx.send(ScanMessage::Error(err.to_string()));
+            let _ = message_tx.send(ScanMessage::StateChange(ScanState::Failed));
+            return;
+        }
+    };
+
+    if let Err(issue) = discovered.check_compatibility() {
+        let _ = message_tx.send(ScanMessage::Error(issue.user_message()));
+        let _ = message_tx.send(ScanMessage::StateChange(ScanState::Failed));
+        return;
+    }
+
+    let binary_path = discovered.path;
+
+    tracing::info!(
+        "Starting swiftbeaver: {} {}",
+        binary_path.display(),
+        args.join(" ")
+    );
+
     // Spawn process
     let child_result = std::process::Command::new(&binary_path)
         .args(&args)

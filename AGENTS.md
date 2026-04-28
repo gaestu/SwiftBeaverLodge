@@ -12,7 +12,7 @@ When requirements are unclear, prefer conservative, backward-compatible changes 
 - Treat SwiftBeaver as an external binary invoked through `std::process::Command`.
 - Do not reimplement carving, parsing, or metadata generation in the GUI unless the task explicitly changes that architecture.
 - Keep `eframe::App::update` non-blocking.
-- Preserve the selected SwiftBeaver variant and generated CLI arguments exactly.
+- Preserve unified `swiftbeaver` discovery, version compatibility checks, and generated CLI arguments exactly.
 - Load results from the run output path reported by SwiftBeaver, not a guessed path.
 - Do not expose evidence paths in user-facing error messages unless the task explicitly requires it.
 - Treat metadata values and carved file paths as untrusted when adding preview, open, export, or cleanup features.
@@ -23,7 +23,7 @@ When requirements are unclear, prefer conservative, backward-compatible changes 
 - Language: Rust 2021
 - GUI: egui 0.29 + eframe
 - Metadata reading: parquet + arrow, JSONL fallback
-- Process integration: bundled or PATH-provided `swiftbeaver-cpu-only`, `swiftbeaver-opencl`, and `swiftbeaver-cuda`
+- Process integration: bundled or PATH-provided `swiftbeaver` (v0.5.1+ unified CLI; GPU toggled via `--gpu`)
 - Standard checks:
   - `cargo fmt`
   - `cargo check`
@@ -33,13 +33,13 @@ When requirements are unclear, prefer conservative, backward-compatible changes 
 ## Repository Layout
 
 - `src/app.rs` - main application state and egui update loop
-- `src/config.rs` - `ScanConfig`, `MetadataBackend`, `GpuVariant`, and file type lists
+- `src/config.rs` - `ScanConfig`, `MetadataBackend`, and file type lists
 - `src/scan/` - binary discovery, subprocess lifecycle, cancellation, progress/log parsing
 - `src/metadata/` - Parquet/JSONL detection, readers, and result types
 - `src/ui/` - configuration, progress, and results panels
 - `tests/` - integration tests that should not require a real SwiftBeaver binary to pass
-- `bin/` - optional downloaded SwiftBeaver binary variants
-- `download-swiftbeaver.sh` - helper for obtaining variants
+- `bin/` - optional bundled `swiftbeaver` (v0.5.1+ unified CLI) discovered alongside the Lodge binary
+- `download-swiftbeaver.sh` - legacy helper that fetched per-GPU variant binaries; retained only for historical reference and not used by the current discovery path
 
 ## Code Rules
 
@@ -56,7 +56,7 @@ When requirements are unclear, prefer conservative, backward-compatible changes 
 
 - `src/scan/manager.rs`: CLI argument mapping, process lifecycle, cancellation, state transitions
 - `src/scan/progress.rs`: SwiftBeaver JSON log compatibility and malformed-line handling
-- `src/scan/mod.rs`: binary discovery and GPU variant availability
+- `src/scan/mod.rs`: unified binary discovery, version probing, and compatibility handling
 - `src/metadata/reader.rs`: Parquet/JSONL schema assumptions, optional columns, large result sets
 - `src/ui/results_panel.rs`: filtering, selected index handling, bounded rendering, future file-opening paths
 - `src/app.rs`: locking, tab transitions, and repaint behavior

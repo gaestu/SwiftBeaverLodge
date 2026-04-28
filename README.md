@@ -16,7 +16,7 @@ A pure Rust desktop application for forensic file recovery using [egui](https://
 - 📊 **Real-time progress monitoring** - Live throughput, ETA, and statistics
 - 📁 **Result browsing** - Filter and search carved files
 - 💾 **Offline/Airgapped operation** - No network required for forensic integrity
-- 🚀 **GPU acceleration** - Optional OpenCL/CUDA support (3 binary variants)
+- 🚀 **GPU acceleration** - Optional OpenCL/CUDA support via the `--gpu` flag
 - 🎯 **Single binary** - No npm, no web stack, just `cargo build`
 
 ## Quick Start
@@ -24,7 +24,7 @@ A pure Rust desktop application for forensic file recovery using [egui](https://
 ### Prerequisites
 
 1. **Rust 1.70+** - Install from [rustup.rs](https://rustup.rs)
-2. **swiftbeaver binary** - Download from [SwiftBeaver releases](https://github.com/gaestu/SwiftBeaver/releases)
+2. **SwiftBeaver v0.5.1+** - Install the unified `swiftbeaver` CLI on your `PATH`
 
 ### Linux System Dependencies
 
@@ -49,13 +49,9 @@ sudo apt install libgtk-3-dev libglib2.0-dev libpango1.0-dev \
 git clone https://github.com/yourusername/SwiftBeaverLodge.git
 cd SwiftBeaverLodge
 
-# Download all swiftbeaver variants (recommended)
-./download-swiftbeaver.sh              # Downloads all: cpu-only, opencl, cuda
-
-# Or download specific variant only
-./download-swiftbeaver.sh cpu-only     # CPU-only variant
-./download-swiftbeaver.sh opencl       # OpenCL variant
-./download-swiftbeaver.sh cuda         # CUDA variant
+# Install SwiftBeaver v0.5.1+ so `swiftbeaver` is on PATH
+# (e.g. via your distribution's package manager or the upstream installer)
+swiftbeaver --version   # should report >= 0.5.1
 
 # Build
 cargo build --release
@@ -64,17 +60,21 @@ cargo build --release
 ./target/release/swiftbeaverlodge
 ```
 
-## GPU Variants
+## SwiftBeaver discovery
 
-SwiftBeaver v0.3.0 offers three binary variants. **All variants are downloaded by default** and you can select which one to use in the UI:
+SwiftBeaverLodge requires the unified `swiftbeaver` CLI introduced in
+SwiftBeaver v0.5.1. It looks for the binary in this order:
 
-| Variant | Binary Name | Description | Use Case |
-|---------|-------------|-------------|----------|
-| `cpu-only` | `swiftbeaver-cpu-only` | No GPU dependencies | Maximum compatibility |
-| `opencl` | `swiftbeaver-opencl` | OpenCL GPU support | NVIDIA/AMD/Intel GPUs |
-| `cuda` | `swiftbeaver-cuda` | CUDA GPU support | Best NVIDIA performance |
+1. `<exe_dir>/bin/swiftbeaver` (alongside the Lodge binary)
+2. `./bin/swiftbeaver` (current working directory)
+3. `swiftbeaver` on `PATH`
 
-The GUI automatically detects available variants and lets you choose which one to run. Select the variant in **Configure → Advanced Options → GPU Variant**.
+The status bar shows the detected version. GPU acceleration is toggled via
+the `--gpu` flag.
+
+| Binary Name | Notes |
+|-------------|-------|
+| `swiftbeaver` | v0.5.1+; GPU enabled via `--gpu` |
 
 ## Screenshot
 
@@ -92,7 +92,7 @@ The GUI automatically detects available variants and lets you choose which one t
 │  ● Idle        │  │ File Types: ☑ jpeg ☑ png ☑ pdf...    │  │
 │                │  └──────────────────────────────────────┘  │
 ├────────────────┴─────────────────────────────────────────────┤
-│  Ready                       swiftbeaver: v0.3.0 (3 variants)│
+│  Ready                                  swiftbeaver: 0.5.1   │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -138,9 +138,7 @@ SwiftBeaverLodge/
 │       ├── progress_panel.rs
 │       └── results_panel.rs
 ├── bin/
-│   ├── swiftbeaver-cpu-only   # CPU-only variant
-│   ├── swiftbeaver-opencl     # OpenCL GPU variant
-│   └── swiftbeaver-cuda       # CUDA GPU variant
+│   └── swiftbeaver            # Unified CLI (v0.5.1+)
 ├── tests/
 │   └── integration_tests.rs
 ├── Cargo.toml
@@ -157,8 +155,7 @@ SwiftBeaverLodge/
 | File Types | Which file types to carve | Common types |
 | Metadata Format | parquet/jsonl/csv | parquet |
 | String Scanning | Extract URLs/emails/phones | enabled |
-| GPU Acceleration | Use GPU for faster scanning | disabled |
-| GPU Variant | cpu-only/opencl/cuda | cpu-only |
+| GPU Acceleration | Use GPU for faster scanning (`--gpu`) | disabled |
 | Evidence Hash | Compute SHA-256 of evidence | enabled |
 
 ## Tests

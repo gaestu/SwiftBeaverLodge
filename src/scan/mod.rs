@@ -3,10 +3,13 @@
 mod manager;
 pub mod progress;
 
-use crate::config::GpuVariant;
+use std::path::{Path, PathBuf};
 
 pub use manager::ScanManager;
 pub use progress::{format_bytes, ScanProgress};
+
+/// Minimum supported SwiftBeaver version (single unified CLI introduced in 0.5.1).
+pub const MIN_SWIFTBEAVER_VERSION: (u32, u32, u32) = (0, 5, 1);
 
 /// Scan state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,104 +29,214 @@ pub struct LogEntry {
     pub message: String,
 }
 
-/// Get swiftbeaver binary version for a specific variant
-pub fn get_swiftbeaver_version() -> String {
-    get_swiftbeaver_version_for_variant(GpuVariant::CpuOnly)
+/// Why a discovered swiftbeaver binary is not usable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompatibilityIssue {
+    /// `swiftbeaver --version` did not return parseable output.
+    UnparseableVersion(String),
+    /// Detected version is older than [`MIN_SWIFTBEAVER_VERSION`].
+    UnsupportedVersion {
+        detected: (u32, u32, u32),
+        minimum: (u32, u32, u32),
+    },
 }
 
-/// Get swiftbeaver binary version for a specific variant
-pub fn get_swiftbeaver_version_for_variant(variant: GpuVariant) -> String {
-    let binary_path = find_swiftbeaver_binary_for_variant(variant);
+impl CompatibilityIssue {
+    /// Render an actionable message suitable for the UI or log output.
+    pub fn user_message(&self) -> String {
+        let (mj, mn, pt) = MIN_SWIFTBEAVER_VERSION;
+        match self {
+            CompatibilityIssue::UnparseableVersion(raw) => format!(
+                "Could not parse swiftbeaver --version output ({:?}). Requires v{}.{}.{}+.",
+                raw, mj, mn, pt
+            ),
+            CompatibilityIssue::UnsupportedVersion {
+                detected: (a, b, c),
+                ..
+            } => format!(
+                "swiftbeaver {}.{}.{} is older than the minimum supported version v{}.{}.{}. \
+                 Please upgrade SwiftBeaver.",
+                a, b, c, mj, mn, pt
+            ),
+        }
+    }
+}
 
-    if let Some(path) = binary_path {
-        if let Ok(output) = std::process::Command::new(&path).arg("--version").output() {
-            if output.status.success() {
-                let version = String::from_utf8_lossy(&output.stdout);
-                return version
-                    .trim()
-                    .strip_prefix("swiftbeaver ")
-                    .unwrap_or(version.trim())
-                    .to_string();
+/// A discovered `swiftbeaver` CLI along with version metadata.
+#[derive(Debug, Clone)]
+pub struct DiscoveredBinary {
+    pub path: PathBuf,
+    /// Parsed semantic version (major, minor, patch), if `--version` succeeded
+    /// and produced parseable output.
+    pub version: Option<(u32, u32, u32)>,
+    /// Raw `--version` output (trimmed), if available.
+    pub version_string: Option<String>,
+}
+
+impl DiscoveredBinary {
+    /// Returns `Ok(())` when the discovered binary meets the minimum version,
+    /// or a [`CompatibilityIssue`] describing why it does not.
+    pub fn check_compatibility(&self) -> Result<(), CompatibilityIssue> {
+        match self.version {
+            Some(v) if meets_minimum_version(v) => Ok(()),
+            Some(detected) => Err(CompatibilityIssue::UnsupportedVersion {
+                detected,
+                minimum: MIN_SWIFTBEAVER_VERSION,
+            }),
+            None => Err(CompatibilityIssue::UnparseableVersion(
+                self.version_string.clone().unwrap_or_default(),
+            )),
+        }
+    }
+}
+
+/// Compare a parsed version against [`MIN_SWIFTBEAVER_VERSION`].
+pub fn meets_minimum_version(version: (u32, u32, u32)) -> bool {
+    version >= MIN_SWIFTBEAVER_VERSION
+}
+
+/// Parse `swiftbeaver 0.5.1`, `swiftbeaver v0.5.1`, or just `0.5.1[-suffix]`
+/// into a `(major, minor, patch)` tuple.
+pub fn parse_swiftbeaver_version(s: &str) -> Option<(u32, u32, u32)> {
+    let trimmed = s.trim();
+    // Strip optional `swiftbeaver ` prefix.
+    let rest = trimmed
+        .strip_prefix("swiftbeaver")
+        .unwrap_or(trimmed)
+        .trim();
+    // Take the first whitespace-separated token, then strip a leading `v`
+    // and any pre-release/build suffix.
+    let token = rest.split_whitespace().next().unwrap_or("");
+    let token = token.strip_prefix('v').unwrap_or(token);
+    let core = token.split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Run `<binary> --version` and return the trimmed stdout, if successful.
+/// Maximum time to wait for `swiftbeaver --version` before giving up.
+///
+/// Bounded so a hung or broken binary cannot freeze any caller (including the
+/// UI thread, which probes at startup and on the Help → Refresh action).
+const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Run `<binary> --version` and return the trimmed stdout, if successful.
+///
+/// Enforces [`VERSION_PROBE_TIMEOUT`]: if the child does not exit in time it
+/// is killed and `None` is returned.
+fn read_version_output(path: &Path) -> Option<String> {
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = std::time::Instant::now() + VERSION_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut buf = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    use std::io::Read;
+                    let _ = out.read_to_string(&mut buf);
+                }
+                return Some(buf.trim().to_string());
             }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::warn!(
+                        "swiftbeaver --version timed out after {:?}; treating as unparseable",
+                        VERSION_PROBE_TIMEOUT
+                    );
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => return None,
         }
     }
-
-    "not installed".to_string()
 }
 
-/// Get list of available (installed) GPU variants
-pub fn get_available_variants() -> Vec<GpuVariant> {
-    let mut available = Vec::new();
-
-    for variant in [GpuVariant::CpuOnly, GpuVariant::OpenCL, GpuVariant::Cuda] {
-        if find_swiftbeaver_binary_for_variant(variant).is_some() {
-            available.push(variant);
+/// Pure helper: return the first `<dir>/<name>` that exists on disk.
+///
+/// Factored out so tests can exercise the search order without mutating
+/// process-global state (PATH, current_exe, cwd).
+fn find_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    for dir in dirs {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return Some(candidate);
         }
     }
-
-    available
+    None
 }
 
-/// Check if a specific variant is available
-pub fn is_variant_available(variant: GpuVariant) -> bool {
-    find_swiftbeaver_binary_for_variant(variant).is_some()
-}
-
-/// Find the swiftbeaver binary for a specific GPU variant
-pub fn find_swiftbeaver_binary_for_variant(variant: GpuVariant) -> Option<std::path::PathBuf> {
-    let binary_name = format!("swiftbeaver-{}", variant.as_str());
-
-    // 1. Check in bin/ directory relative to executable
+/// Search the standard locations for a binary with the given name.
+///
+/// Order:
+/// 1. `<exe_dir>/bin/<name>`
+/// 2. `./bin/<name>` (current working directory)
+/// 3. PATH lookup via `which`
+fn find_named_binary(name: &str) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let bin_path = exe_dir.join("bin").join(&binary_name);
-            if bin_path.exists() {
-                return Some(bin_path);
-            }
+            dirs.push(exe_dir.join("bin"));
         }
     }
-
-    // 2. Check current directory bin/
-    let cwd_bin = std::path::PathBuf::from(format!("bin/{}", binary_name));
-    if cwd_bin.exists() {
-        return Some(cwd_bin);
+    dirs.push(PathBuf::from("bin"));
+    if let Some(p) = find_in_dirs(name, &dirs) {
+        return Some(p);
     }
-
-    // 3. Check PATH
-    which::which(&binary_name).ok()
+    which::which(name).ok()
 }
 
-/// Find any swiftbeaver binary (legacy - prefers cpu-only, then any variant)
-pub fn find_swiftbeaver_binary() -> Option<std::path::PathBuf> {
-    // Try variants in order of preference
-    for variant in [GpuVariant::CpuOnly, GpuVariant::OpenCL, GpuVariant::Cuda] {
-        if let Some(path) = find_swiftbeaver_binary_for_variant(variant) {
-            return Some(path);
-        }
-    }
-
-    // Fallback: check for generic "swiftbeaver" (symlink or legacy)
-    let locations = [std::path::PathBuf::from("bin/swiftbeaver")];
-
-    for path in locations {
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    // Check PATH
-    which::which("swiftbeaver").ok()
+/// Find the unified `swiftbeaver` CLI (v0.5.1+).
+pub fn find_swiftbeaver_binary() -> Option<PathBuf> {
+    find_named_binary("swiftbeaver")
 }
 
-// Legacy aliases for backward compatibility
+/// Discover the installed `swiftbeaver` CLI and read its version.
+///
+/// Returns `None` only when no `swiftbeaver` binary is found at all. Returned
+/// binaries may still be incompatible — callers should consult
+/// [`DiscoveredBinary::check_compatibility`].
+pub fn discover_swiftbeaver() -> Option<DiscoveredBinary> {
+    let path = find_swiftbeaver_binary()?;
+    let version_string = read_version_output(&path);
+    let version = version_string
+        .as_deref()
+        .and_then(parse_swiftbeaver_version);
+    Some(DiscoveredBinary {
+        path,
+        version,
+        version_string,
+    })
+}
+
+/// Convenience: human-readable swiftbeaver version string for status displays,
+/// or `"not installed"` when no binary is found.
 #[allow(dead_code)]
-pub fn find_fastcarve_binary() -> Option<std::path::PathBuf> {
-    find_swiftbeaver_binary()
-}
-
-#[allow(dead_code)]
-pub fn get_fastcarve_version() -> String {
-    get_swiftbeaver_version()
+pub fn get_swiftbeaver_version() -> String {
+    discover_swiftbeaver()
+        .and_then(|b| {
+            b.version_string
+                .or_else(|| b.version.map(|(a, b, c)| format!("{}.{}.{}", a, b, c)))
+        })
+        .map(|s| s.strip_prefix("swiftbeaver ").unwrap_or(&s).to_string())
+        .unwrap_or_else(|| "not installed".to_string())
 }
 
 #[cfg(test)]
@@ -138,23 +251,151 @@ mod tests {
 
     #[test]
     fn test_find_swiftbeaver_in_path() {
-        // This test just ensures the function doesn't panic
         let _ = find_swiftbeaver_binary();
     }
 
     #[test]
-    fn test_get_available_variants() {
-        // This test just ensures the function doesn't panic
-        let variants = get_available_variants();
-        // variants may be empty if no binaries installed
-        assert!(variants.len() <= 3);
+    fn test_parse_swiftbeaver_version_with_prefix() {
+        assert_eq!(
+            parse_swiftbeaver_version("swiftbeaver 0.5.1"),
+            Some((0, 5, 1))
+        );
+        assert_eq!(
+            parse_swiftbeaver_version("swiftbeaver 1.2.3\n"),
+            Some((1, 2, 3))
+        );
     }
 
     #[test]
-    fn test_find_variant_binary() {
-        // This test just ensures the function doesn't panic
-        let _ = find_swiftbeaver_binary_for_variant(GpuVariant::CpuOnly);
-        let _ = find_swiftbeaver_binary_for_variant(GpuVariant::OpenCL);
-        let _ = find_swiftbeaver_binary_for_variant(GpuVariant::Cuda);
+    fn test_parse_swiftbeaver_version_v_prefix() {
+        // `swiftbeaver vX.Y.Z` and bare `vX.Y.Z` are both common.
+        assert_eq!(
+            parse_swiftbeaver_version("swiftbeaver v0.5.1"),
+            Some((0, 5, 1))
+        );
+        assert_eq!(
+            parse_swiftbeaver_version("swiftbeaver v0.4.0"),
+            Some((0, 4, 0))
+        );
+        assert_eq!(parse_swiftbeaver_version("v1.2.3"), Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn test_parse_swiftbeaver_version_bare() {
+        assert_eq!(parse_swiftbeaver_version("0.5.1"), Some((0, 5, 1)));
+        assert_eq!(
+            parse_swiftbeaver_version("  10.20.30  "),
+            Some((10, 20, 30))
+        );
+    }
+
+    #[test]
+    fn test_parse_swiftbeaver_version_two_part() {
+        assert_eq!(
+            parse_swiftbeaver_version("swiftbeaver 0.5"),
+            Some((0, 5, 0))
+        );
+    }
+
+    #[test]
+    fn test_parse_swiftbeaver_version_with_suffix() {
+        assert_eq!(
+            parse_swiftbeaver_version("swiftbeaver 0.5.1-rc.1"),
+            Some((0, 5, 1))
+        );
+        assert_eq!(
+            parse_swiftbeaver_version("swiftbeaver 0.5.1+build.7"),
+            Some((0, 5, 1))
+        );
+        assert_eq!(
+            parse_swiftbeaver_version("swiftbeaver v0.5.1-rc.1"),
+            Some((0, 5, 1))
+        );
+    }
+
+    #[test]
+    fn test_parse_swiftbeaver_version_invalid() {
+        assert_eq!(parse_swiftbeaver_version(""), None);
+        assert_eq!(parse_swiftbeaver_version("swiftbeaver"), None);
+        assert_eq!(parse_swiftbeaver_version("not a version"), None);
+        assert_eq!(parse_swiftbeaver_version("swiftbeaver vX.Y.Z"), None);
+    }
+
+    #[test]
+    fn test_meets_minimum_version() {
+        assert!(meets_minimum_version((0, 5, 1)));
+        assert!(meets_minimum_version((0, 5, 2)));
+        assert!(meets_minimum_version((1, 0, 0)));
+        assert!(!meets_minimum_version((0, 5, 0)));
+        assert!(!meets_minimum_version((0, 4, 99)));
+    }
+
+    #[test]
+    fn test_compatibility_old_version_blocks() {
+        let b = DiscoveredBinary {
+            path: PathBuf::from("/tmp/swiftbeaver"),
+            version: Some((0, 4, 0)),
+            version_string: Some("swiftbeaver 0.4.0".to_string()),
+        };
+        assert!(b.check_compatibility().is_err());
+        assert_eq!(
+            b.check_compatibility(),
+            Err(CompatibilityIssue::UnsupportedVersion {
+                detected: (0, 4, 0),
+                minimum: MIN_SWIFTBEAVER_VERSION,
+            })
+        );
+    }
+
+    #[test]
+    fn test_compatibility_unparseable_version_blocks() {
+        let b = DiscoveredBinary {
+            path: PathBuf::from("/tmp/swiftbeaver"),
+            version: None,
+            version_string: Some("garbage output".to_string()),
+        };
+        assert!(b.check_compatibility().is_err());
+        assert!(matches!(
+            b.check_compatibility(),
+            Err(CompatibilityIssue::UnparseableVersion(_))
+        ));
+    }
+
+    #[test]
+    fn test_compatibility_minimum_version_passes() {
+        let b = DiscoveredBinary {
+            path: PathBuf::from("/tmp/swiftbeaver"),
+            version: Some(MIN_SWIFTBEAVER_VERSION),
+            version_string: Some("swiftbeaver 0.5.1".to_string()),
+        };
+        assert!(b.check_compatibility().is_ok());
+    }
+
+    #[test]
+    fn test_find_in_dirs_returns_first_match() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir1 = tmp.path().join("a");
+        let dir2 = tmp.path().join("b");
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::create_dir_all(&dir2).unwrap();
+        let target = dir2.join("swiftbeaver");
+        std::fs::write(&target, b"#!/bin/sh\n").unwrap();
+        assert_eq!(
+            find_in_dirs("swiftbeaver", &[dir1.clone(), dir2.clone()]),
+            Some(target.clone())
+        );
+        // dir1 takes precedence when both contain the file.
+        let target1 = dir1.join("swiftbeaver");
+        std::fs::write(&target1, b"#!/bin/sh\n").unwrap();
+        assert_eq!(find_in_dirs("swiftbeaver", &[dir1, dir2]), Some(target1));
+    }
+
+    #[test]
+    fn test_find_in_dirs_returns_none_when_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            find_in_dirs("swiftbeaver", &[tmp.path().to_path_buf()]),
+            None
+        );
     }
 }

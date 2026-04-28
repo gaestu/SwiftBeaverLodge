@@ -4,11 +4,9 @@ use egui::{Color32, RichText, Ui};
 use rfd::FileDialog;
 
 use crate::config::{
-    validate_flag_combinations, GpuVariant, MetadataBackend, ScanConfig, FILE_TYPES,
-    SUPPORTED_HASH_ALGORITHMS,
+    validate_flag_combinations, MetadataBackend, ScanConfig, FILE_TYPES, SUPPORTED_HASH_ALGORITHMS,
 };
 use crate::devices::{list_block_devices, BlockDevice, DeviceType};
-use crate::scan::{get_available_variants, is_variant_available};
 
 /// Input source type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,82 +329,9 @@ impl ConfigPanel {
                 ui.add_space(10.0);
 
                 // GPU Acceleration section
-                ui.label(RichText::new("GPU Variant").strong());
-
-                // Get available variants
-                let available_variants = get_available_variants();
-
-                // Show available variants status
-                if available_variants.is_empty() {
-                    ui.colored_label(Color32::RED, "⚠ No swiftbeaver binaries found!");
-                    ui.label(RichText::new("Run: ./download-swiftbeaver.sh").weak());
-                } else {
-                    let variant_names: Vec<&str> =
-                        available_variants.iter().map(|v| v.as_str()).collect();
-                    ui.label(
-                        RichText::new(format!("Available: {}", variant_names.join(", "))).weak(),
-                    );
-                }
-
-                // GPU variant selection
-                ui.horizontal(|ui| {
-                    ui.label("Use variant:");
-                    egui::ComboBox::from_id_salt("gpu_variant")
-                        .selected_text(config.gpu_variant.display_name())
-                        .show_ui(ui, |ui| {
-                            for variant in
-                                [GpuVariant::CpuOnly, GpuVariant::OpenCL, GpuVariant::Cuda]
-                            {
-                                let available = is_variant_available(variant);
-                                let label = if available {
-                                    format!("✓ {}", variant.display_name())
-                                } else {
-                                    format!("✗ {} (not installed)", variant.display_name())
-                                };
-
-                                // Only allow selection if available
-                                let response =
-                                    ui.selectable_value(&mut config.gpu_variant, variant, &label);
-                                if !available && response.clicked() {
-                                    // Revert to previous if not available
-                                    config.gpu_variant = available_variants
-                                        .first()
-                                        .copied()
-                                        .unwrap_or(GpuVariant::CpuOnly);
-                                }
-                            }
-                        });
-                });
-
-                // Warn if selected variant is not available
-                if !is_variant_available(config.gpu_variant) {
-                    ui.colored_label(
-                        Color32::YELLOW,
-                        format!(
-                            "⚠ {} not installed. Run: ./download-swiftbeaver.sh {}",
-                            config.gpu_variant.as_str(),
-                            config.gpu_variant.as_str()
-                        ),
-                    );
-                }
-
-                // GPU enable checkbox (only if variant supports GPU)
-                let gpu_available =
-                    config.gpu_variant.supports_gpu() && is_variant_available(config.gpu_variant);
-                ui.add_enabled_ui(gpu_available, |ui| {
-                    ui.checkbox(&mut config.gpu_enabled, "Enable GPU acceleration (--gpu)");
-                });
-
-                if !config.gpu_variant.supports_gpu() && config.gpu_enabled {
-                    config.gpu_enabled = false;
-                }
-
-                if config.gpu_variant.supports_gpu()
-                    && is_variant_available(config.gpu_variant)
-                    && !config.gpu_enabled
-                {
-                    ui.label(RichText::new("ℹ GPU variant selected but GPU disabled").weak());
-                }
+                ui.label(RichText::new("GPU Acceleration").strong());
+                ui.label(RichText::new("GPU support is toggled via the --gpu flag.").weak());
+                ui.checkbox(&mut config.gpu_enabled, "Enable GPU acceleration (--gpu)");
 
                 ui.add_space(10.0);
 

@@ -19,7 +19,7 @@ First read the root `AGENTS.md`, then follow it strictly.
    - tests that need updates
    - documentation that may become stale
 
-3. Create an implementation plan before editing code. If working directly on a GitHub issue with comment tools available, post the plan there; otherwise include the plan in chat.
+3. Create an implementation plan before editing code. Post the plan as a comment to the github issue.
 
 4. Implement conservatively:
    - preserve the egui/subprocess architecture unless the issue explicitly changes it
@@ -59,7 +59,7 @@ First read the root `AGENTS.md`, then follow it strictly.
 
    For prompt-only or documentation-only changes, validate stale references instead of running unnecessary Rust builds.
 
-9. Return:
+9.  Return:
    - summary of changes
    - files modified
    - tests added or updated
@@ -73,6 +73,6 @@ First read the root `AGENTS.md`, then follow it strictly.
 
 - Never write to evidence or source images.
 - Do not replace the SwiftBeaver subprocess boundary with ad hoc parser/carver logic.
-- Keep selected GPU variant behavior aligned across config, UI, binary discovery, and CLI args.
+- Keep unified CLI discovery, version compatibility, and `gpu_enabled`/`--gpu` behavior aligned across config, UI, binary discovery, and CLI args.
 - Keep result loading aligned across `MetadataBackend`, `MetadataReader`, tests, and README.
 - Ensure missing SwiftBeaver binaries produce actionable errors.

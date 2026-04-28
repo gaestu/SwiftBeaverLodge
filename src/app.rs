@@ -1,11 +1,55 @@
 //! Application state and main loop
 
 use eframe::egui;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    mpsc::{channel, Receiver},
+    Arc, Mutex,
+};
 
 use crate::config::ScanConfig;
-use crate::scan::{ScanManager, ScanState};
+use crate::scan::{discover_swiftbeaver, DiscoveredBinary, ScanManager, ScanState};
 use crate::ui::{ConfigPanel, ProgressPanel, ResultsPanel, Tab};
+
+/// Cached result of probing the system for the `swiftbeaver` CLI.
+///
+/// Computed off the egui update loop so a slow/hung binary cannot freeze the
+/// UI during startup or an explicit refresh.
+#[derive(Debug)]
+struct SwiftBeaverStatus {
+    discovered: Option<DiscoveredBinary>,
+    probe_rx: Option<Receiver<Option<DiscoveredBinary>>>,
+}
+
+impl SwiftBeaverStatus {
+    fn probe_async() -> Self {
+        let mut status = Self {
+            discovered: None,
+            probe_rx: None,
+        };
+        status.refresh();
+        status
+    }
+
+    fn refresh(&mut self) {
+        let (tx, rx) = channel();
+        self.probe_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(discover_swiftbeaver());
+        });
+    }
+
+    fn poll(&mut self) {
+        let resolved = self.probe_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(discovered) = resolved {
+            self.discovered = discovered;
+            self.probe_rx = None;
+        }
+    }
+
+    fn is_probing(&self) -> bool {
+        self.probe_rx.is_some()
+    }
+}
 
 /// Main application state
 pub struct SwiftBeaverApp {
@@ -28,6 +72,9 @@ pub struct SwiftBeaverApp {
 
     /// Status message
     status_message: String,
+
+    /// Cached swiftbeaver discovery result. Refreshable via the Help menu.
+    swiftbeaver_status: SwiftBeaverStatus,
 }
 
 impl SwiftBeaverApp {
@@ -41,6 +88,7 @@ impl SwiftBeaverApp {
             results_panel: ResultsPanel::new(),
             last_run_path: None,
             status_message: "Ready".to_string(),
+            swiftbeaver_status: SwiftBeaverStatus::probe_async(),
         }
     }
 
@@ -73,6 +121,8 @@ impl SwiftBeaverApp {
 
 impl eframe::App for SwiftBeaverApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.swiftbeaver_status.poll();
+
         // Poll scan manager for updates (non-blocking!)
         {
             let mut mgr = self.scan_manager.lock().unwrap();
@@ -80,13 +130,14 @@ impl eframe::App for SwiftBeaverApp {
         }
 
         // Now get current state
-        let (state, progress, run_path, logs) = {
+        let (state, progress, run_path, logs, scan_error) = {
             let mgr = self.scan_manager.lock().unwrap();
             (
                 mgr.state(),
                 mgr.progress().cloned(),
                 mgr.run_output_path().map(|p| p.to_string()),
                 mgr.logs().to_vec(),
+                mgr.error().map(|s| s.to_string()),
             )
         };
 
@@ -95,10 +146,25 @@ impl eframe::App for SwiftBeaverApp {
             self.last_run_path = run_path.clone();
         }
 
-        // Auto-switch to results when complete
-        if state == ScanState::Completed && self.current_tab == Tab::Monitor {
-            self.current_tab = Tab::Results;
-            self.status_message = "Scan completed!".to_string();
+        // Update status bar to reflect terminal scan states.
+        match state {
+            ScanState::Completed if self.current_tab == Tab::Monitor => {
+                self.current_tab = Tab::Results;
+                self.status_message = "Scan completed!".to_string();
+            }
+            ScanState::Completed => {
+                self.status_message = "Scan completed!".to_string();
+            }
+            ScanState::Failed => {
+                let msg = scan_error
+                    .as_deref()
+                    .unwrap_or("Scan failed (unknown error)");
+                self.status_message = format!("Error: {}", msg);
+            }
+            ScanState::Cancelled => {
+                self.status_message = "Scan cancelled.".to_string();
+            }
+            _ => {}
         }
 
         // Top menu bar
@@ -128,6 +194,10 @@ impl eframe::App for SwiftBeaverApp {
                 });
 
                 ui.menu_button("Help", |ui| {
+                    if ui.button("Refresh swiftbeaver detection").clicked() {
+                        self.swiftbeaver_status.refresh();
+                        ui.close_menu();
+                    }
                     if ui.button("About").clicked() {
                         // Show about dialog
                         ui.close_menu();
@@ -136,19 +206,49 @@ impl eframe::App for SwiftBeaverApp {
             });
         });
 
-        // Bottom status bar
+        // Bottom status bar (uses cached discovery so we never block the UI
+        // loop on `swiftbeaver --version`).
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status_message);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Show available variants count
-                    let available = crate::scan::get_available_variants();
-                    let version = crate::scan::get_swiftbeaver_version();
-                    ui.label(format!(
-                        "swiftbeaver: {} ({} variants)",
-                        version,
-                        available.len()
-                    ));
+                    if self.swiftbeaver_status.is_probing() {
+                        ui.label("swiftbeaver: probing...");
+                    } else {
+                        match &self.swiftbeaver_status.discovered {
+                            Some(discovered) => {
+                                let version_text = discovered
+                                    .version_string
+                                    .as_deref()
+                                    .map(|s| {
+                                        s.strip_prefix("swiftbeaver ").unwrap_or(s).to_string()
+                                    })
+                                    .unwrap_or_else(|| "unknown".to_string());
+
+                                match discovered.check_compatibility() {
+                                    Ok(()) => {
+                                        ui.label(format!("swiftbeaver: {}", version_text));
+                                    }
+                                    Err(issue) => {
+                                        ui.colored_label(
+                                            egui::Color32::RED,
+                                            format!(
+                                                "swiftbeaver: {} — {}",
+                                                version_text,
+                                                issue.user_message()
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            None => {
+                                ui.colored_label(
+                                    egui::Color32::RED,
+                                    "swiftbeaver: not installed (requires v0.5.1+)",
+                                );
+                            }
+                        }
+                    }
                     ui.separator();
                     ui.label(format!("SwiftBeaverLodge v{}", env!("CARGO_PKG_VERSION")));
                 });
