@@ -14,6 +14,7 @@ When requirements are unclear, prefer conservative, backward-compatible changes 
 - Keep `eframe::App::update` non-blocking.
 - Preserve the selected SwiftBeaver variant and generated CLI arguments exactly.
 - Load results from the run output path reported by SwiftBeaver, not a guessed path.
+- Do not expose evidence paths in user-facing error messages unless the task explicitly requires it.
 - Treat metadata values and carved file paths as untrusted when adding preview, open, export, or cleanup features.
 - Keep normal scanning and result browsing offline/airgapped friendly.
 
