@@ -5,8 +5,8 @@
 mod app;
 mod config;
 mod devices;
-mod scan;
 mod metadata;
+mod scan;
 mod ui;
 
 use eframe::egui;

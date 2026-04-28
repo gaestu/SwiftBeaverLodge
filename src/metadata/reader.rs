@@ -1,15 +1,15 @@
 //! Metadata reader for Parquet and JSONL files
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
-use arrow::array::{Array, StringArray, Int64Array, UInt64Array, BooleanArray, UInt32Array};
+use anyhow::{bail, Context, Result};
+use arrow::array::{Array, BooleanArray, Int64Array, StringArray, UInt32Array, UInt64Array};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use super::types::{CarvedFile, StringArtefact, MetadataSummary};
+use super::types::{CarvedFile, MetadataSummary, StringArtefact};
 
 /// Reader for scan metadata
 pub struct MetadataReader {
@@ -21,11 +21,11 @@ impl MetadataReader {
     /// Create a new metadata reader for a run directory
     pub fn new(run_path: impl AsRef<Path>) -> Result<Self> {
         let run_path = run_path.as_ref().to_path_buf();
-        
+
         let backend = super::detect_metadata_backend(&run_path)
             .context("No metadata found in run directory")?
             .to_string();
-        
+
         Ok(Self { run_path, backend })
     }
 
@@ -53,9 +53,10 @@ impl MetadataReader {
         for entry in std::fs::read_dir(&parquet_dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.extension().map(|e| e == "parquet").unwrap_or(false)
-                && path.file_name()
+                && path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .map(|n| n.starts_with("files_"))
                     .unwrap_or(false)
@@ -71,52 +72,74 @@ impl MetadataReader {
     /// Read a single Parquet file
     fn read_parquet_file(&self, path: &Path) -> Result<Vec<CarvedFile>> {
         let file = File::open(path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
-            .build()?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
 
         let mut files = Vec::new();
         let mut next_id: u64 = 0;
 
         for batch_result in reader {
             let batch = batch_result?;
-            
+
             // Get column arrays - use actual fastcarve column names
-            let type_col = batch.column_by_name("file_type")
+            let type_col = batch
+                .column_by_name("file_type")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch.column_by_name("global_start")
+            let offset_col = batch
+                .column_by_name("global_start")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let size_col = batch.column_by_name("size")
+            let size_col = batch
+                .column_by_name("size")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let output_col = batch.column_by_name("carved_path")
+            let output_col = batch
+                .column_by_name("carved_path")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let sha256_col = batch.column_by_name("sha256")
+            let sha256_col = batch
+                .column_by_name("sha256")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let valid_col = batch.column_by_name("validated")
+            let valid_col = batch
+                .column_by_name("validated")
                 .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
-            let width_col = batch.column_by_name("width")
+            let width_col = batch
+                .column_by_name("width")
                 .and_then(|c| c.as_any().downcast_ref::<UInt32Array>());
-            let height_col = batch.column_by_name("height")
+            let height_col = batch
+                .column_by_name("height")
                 .and_then(|c| c.as_any().downcast_ref::<UInt32Array>());
 
             for i in 0..batch.num_rows() {
-                let file = CarvedFile {
-                    id: next_id,
-                    file_type: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
-                    offset: offset_col.map(|c| c.value(i) as u64).unwrap_or(0),
-                    size: size_col.map(|c| c.value(i) as u64).unwrap_or(0),
-                    output_path: output_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
-                    sha256: sha256_col.and_then(|c| {
-                        if c.is_null(i) { None } else { Some(c.value(i).to_string()) }
-                    }),
-                    is_valid: valid_col.map(|c| c.value(i)).unwrap_or(true),
-                    mime_type: None,
-                    width: width_col.and_then(|c| {
-                        if c.is_null(i) { None } else { Some(c.value(i)) }
-                    }),
-                    height: height_col.and_then(|c| {
-                        if c.is_null(i) { None } else { Some(c.value(i)) }
-                    }),
-                };
+                let file =
+                    CarvedFile {
+                        id: next_id,
+                        file_type: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                        offset: offset_col.map(|c| c.value(i) as u64).unwrap_or(0),
+                        size: size_col.map(|c| c.value(i) as u64).unwrap_or(0),
+                        output_path: output_col
+                            .map(|c| c.value(i).to_string())
+                            .unwrap_or_default(),
+                        sha256: sha256_col.and_then(|c| {
+                            if c.is_null(i) {
+                                None
+                            } else {
+                                Some(c.value(i).to_string())
+                            }
+                        }),
+                        is_valid: valid_col.map(|c| c.value(i)).unwrap_or(true),
+                        mime_type: None,
+                        width: width_col.and_then(|c| {
+                            if c.is_null(i) {
+                                None
+                            } else {
+                                Some(c.value(i))
+                            }
+                        }),
+                        height: height_col.and_then(|c| {
+                            if c.is_null(i) {
+                                None
+                            } else {
+                                Some(c.value(i))
+                            }
+                        }),
+                    };
                 files.push(file);
                 next_id += 1;
             }
@@ -130,20 +153,20 @@ impl MetadataReader {
         let jsonl_path = self.run_path.join("metadata").join("carved_files.jsonl");
         let file = File::open(&jsonl_path)?;
         let reader = BufReader::new(file);
-        
+
         let mut files = Vec::new();
-        
+
         for line in reader.lines() {
             let line = line?;
             if line.is_empty() {
                 continue;
             }
-            
+
             let file: CarvedFile = serde_json::from_str(&line)
                 .with_context(|| format!("Failed to parse line: {}", line))?;
             files.push(file);
         }
-        
+
         Ok(files)
     }
 
@@ -191,19 +214,21 @@ impl MetadataReader {
     /// Read URL artefacts from Parquet
     fn read_url_artefacts(&self, path: &Path) -> Result<Vec<StringArtefact>> {
         let file = File::open(path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
-            .build()?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
 
         let mut artefacts = Vec::new();
 
         for batch_result in reader {
             let batch = batch_result?;
-            
-            let url_col = batch.column_by_name("url")
+
+            let url_col = batch
+                .column_by_name("url")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch.column_by_name("global_start")
+            let offset_col = batch
+                .column_by_name("global_start")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let end_col = batch.column_by_name("global_end")
+            let end_col = batch
+                .column_by_name("global_end")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
 
             for i in 0..batch.num_rows() {
@@ -225,19 +250,21 @@ impl MetadataReader {
     /// Read email artefacts from Parquet
     fn read_email_artefacts(&self, path: &Path) -> Result<Vec<StringArtefact>> {
         let file = File::open(path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
-            .build()?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
 
         let mut artefacts = Vec::new();
 
         for batch_result in reader {
             let batch = batch_result?;
-            
-            let email_col = batch.column_by_name("email")
+
+            let email_col = batch
+                .column_by_name("email")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch.column_by_name("global_start")
+            let offset_col = batch
+                .column_by_name("global_start")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let end_col = batch.column_by_name("global_end")
+            let end_col = batch
+                .column_by_name("global_end")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
 
             for i in 0..batch.num_rows() {
@@ -245,7 +272,9 @@ impl MetadataReader {
                 let end = end_col.map(|c| c.value(i) as u64).unwrap_or(0);
                 let artefact = StringArtefact {
                     artefact_type: "email".to_string(),
-                    value: email_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    value: email_col
+                        .map(|c| c.value(i).to_string())
+                        .unwrap_or_default(),
                     offset,
                     length: end.saturating_sub(offset),
                 };
@@ -259,20 +288,22 @@ impl MetadataReader {
     /// Read phone artefacts from Parquet
     fn read_phone_artefacts(&self, path: &Path) -> Result<Vec<StringArtefact>> {
         let file = File::open(path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
-            .build()?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
 
         let mut artefacts = Vec::new();
 
         for batch_result in reader {
             let batch = batch_result?;
-            
-            let phone_col = batch.column_by_name("phone")
+
+            let phone_col = batch
+                .column_by_name("phone")
                 .or_else(|| batch.column_by_name("number"))
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch.column_by_name("global_start")
+            let offset_col = batch
+                .column_by_name("global_start")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let end_col = batch.column_by_name("global_end")
+            let end_col = batch
+                .column_by_name("global_end")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
 
             for i in 0..batch.num_rows() {
@@ -280,7 +311,9 @@ impl MetadataReader {
                 let end = end_col.map(|c| c.value(i) as u64).unwrap_or(0);
                 let artefact = StringArtefact {
                     artefact_type: "phone".to_string(),
-                    value: phone_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    value: phone_col
+                        .map(|c| c.value(i).to_string())
+                        .unwrap_or_default(),
                     offset,
                     length: end.saturating_sub(offset),
                 };
@@ -294,28 +327,33 @@ impl MetadataReader {
     /// Read legacy strings.parquet format
     fn read_legacy_strings(&self, path: &Path) -> Result<Vec<StringArtefact>> {
         let file = File::open(path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
-            .build()?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
 
         let mut artefacts = Vec::new();
 
         for batch_result in reader {
             let batch = batch_result?;
-            
-            let type_col = batch.column_by_name("type")
+
+            let type_col = batch
+                .column_by_name("type")
                 .or_else(|| batch.column_by_name("artefact_type"))
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let value_col = batch.column_by_name("value")
+            let value_col = batch
+                .column_by_name("value")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch.column_by_name("offset")
+            let offset_col = batch
+                .column_by_name("offset")
                 .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
-            let length_col = batch.column_by_name("length")
+            let length_col = batch
+                .column_by_name("length")
                 .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
 
             for i in 0..batch.num_rows() {
                 let artefact = StringArtefact {
                     artefact_type: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
-                    value: value_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    value: value_col
+                        .map(|c| c.value(i).to_string())
+                        .unwrap_or_default(),
                     offset: offset_col.map(|c| c.value(i)).unwrap_or(0),
                     length: length_col.map(|c| c.value(i)).unwrap_or(0),
                 };
@@ -329,26 +367,26 @@ impl MetadataReader {
     /// Read string artefacts from JSONL
     fn read_string_artefacts_jsonl(&self) -> Result<Vec<StringArtefact>> {
         let jsonl_path = self.run_path.join("metadata").join("strings.jsonl");
-        
+
         if !jsonl_path.exists() {
             return Ok(Vec::new());
         }
 
         let file = File::open(&jsonl_path)?;
         let reader = BufReader::new(file);
-        
+
         let mut artefacts = Vec::new();
-        
+
         for line in reader.lines() {
             let line = line?;
             if line.is_empty() {
                 continue;
             }
-            
+
             let artefact: StringArtefact = serde_json::from_str(&line)?;
             artefacts.push(artefact);
         }
-        
+
         Ok(artefacts)
     }
 
@@ -356,15 +394,15 @@ impl MetadataReader {
     pub fn get_summary(&self) -> Result<MetadataSummary> {
         let files = self.read_carved_files()?;
         let strings = self.read_string_artefacts()?;
-        
+
         let mut by_type: HashMap<String, usize> = HashMap::new();
         let mut total_bytes = 0u64;
-        
+
         for file in &files {
             *by_type.entry(file.file_type.clone()).or_insert(0) += 1;
             total_bytes += file.size;
         }
-        
+
         Ok(MetadataSummary {
             total_files: files.len(),
             by_type,
@@ -377,8 +415,8 @@ impl MetadataReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_reader_requires_metadata() {
@@ -393,10 +431,10 @@ mod tests {
         let metadata_dir = temp.path().join("metadata");
         fs::create_dir(&metadata_dir).unwrap();
         fs::write(metadata_dir.join("carved_files.jsonl"), "").unwrap();
-        
+
         let reader = MetadataReader::new(temp.path()).unwrap();
         assert_eq!(reader.backend(), "jsonl");
-        
+
         let files = reader.read_carved_files().unwrap();
         assert!(files.is_empty());
     }
@@ -406,14 +444,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let metadata_dir = temp.path().join("metadata");
         fs::create_dir(&metadata_dir).unwrap();
-        
+
         let data = r#"{"id":1,"file_type":"jpeg","offset":1024,"size":4096,"output_path":"out/1.jpg","is_valid":true}
 {"id":2,"file_type":"png","offset":5120,"size":2048,"output_path":"out/2.png","is_valid":true}"#;
         fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
-        
+
         let reader = MetadataReader::new(temp.path()).unwrap();
         let files = reader.read_carved_files().unwrap();
-        
+
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].id, 1);
         assert_eq!(files[0].file_type, "jpeg");
@@ -426,15 +464,15 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let metadata_dir = temp.path().join("metadata");
         fs::create_dir(&metadata_dir).unwrap();
-        
+
         let data = r#"{"id":1,"file_type":"jpeg","offset":0,"size":1000,"output_path":"1.jpg","is_valid":true}
 {"id":2,"file_type":"jpeg","offset":1000,"size":2000,"output_path":"2.jpg","is_valid":true}
 {"id":3,"file_type":"png","offset":3000,"size":500,"output_path":"3.png","is_valid":true}"#;
         fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
-        
+
         let reader = MetadataReader::new(temp.path()).unwrap();
         let summary = reader.get_summary().unwrap();
-        
+
         assert_eq!(summary.total_files, 3);
         assert_eq!(summary.total_bytes, 3500);
         assert_eq!(summary.by_type.get("jpeg"), Some(&2));

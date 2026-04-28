@@ -1,8 +1,8 @@
 //! Results browser panel
 
-use egui::{Ui, RichText, Color32};
+use egui::{Color32, RichText, Ui};
 
-use crate::metadata::{MetadataReader, CarvedFile, StringArtefact, MetadataSummary};
+use crate::metadata::{CarvedFile, MetadataReader, MetadataSummary, StringArtefact};
 use crate::scan::format_bytes;
 
 /// Results browser panel
@@ -63,7 +63,7 @@ impl ResultsPanel {
     pub fn load(&mut self, run_path: &str) {
         self.run_path = Some(run_path.to_string());
         self.error = None;
-        
+
         match MetadataReader::new(run_path) {
             Ok(reader) => {
                 // Load summary
@@ -71,13 +71,13 @@ impl ResultsPanel {
                     Ok(summary) => self.summary = Some(summary),
                     Err(e) => self.error = Some(format!("Failed to load summary: {}", e)),
                 }
-                
+
                 // Load files
                 match reader.read_carved_files() {
                     Ok(files) => self.files = files,
                     Err(e) => self.error = Some(format!("Failed to load files: {}", e)),
                 }
-                
+
                 // Load strings
                 match reader.read_string_artefacts() {
                     Ok(strings) => self.strings = strings,
@@ -86,7 +86,7 @@ impl ResultsPanel {
                         tracing::debug!("No string artefacts: {}", e);
                     }
                 }
-                
+
                 self.reader = Some(reader);
             }
             Err(e) => {
@@ -127,23 +127,31 @@ impl ResultsPanel {
         // No results loaded
         if self.reader.is_none() {
             ui.label("No results loaded. Run a scan or load previous results.");
-            
+
             ui.add_space(10.0);
-            
+
             if ui.button("Load Previous Results...").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.load(&path.display().to_string());
                 }
             }
-            
+
             return;
         }
 
         // Tab bar
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.current_tab, ResultsTab::Overview, "Overview");
-            ui.selectable_value(&mut self.current_tab, ResultsTab::Files, format!("Files ({})", self.files.len()));
-            ui.selectable_value(&mut self.current_tab, ResultsTab::Strings, format!("Strings ({})", self.strings.len()));
+            ui.selectable_value(
+                &mut self.current_tab,
+                ResultsTab::Files,
+                format!("Files ({})", self.files.len()),
+            );
+            ui.selectable_value(
+                &mut self.current_tab,
+                ResultsTab::Strings,
+                format!("Strings ({})", self.strings.len()),
+            );
         });
 
         ui.separator();
@@ -159,7 +167,7 @@ impl ResultsPanel {
         if let Some(summary) = &self.summary {
             ui.group(|ui| {
                 ui.label(RichText::new("Summary").strong());
-                
+
                 egui::Grid::new("summary_grid")
                     .num_columns(2)
                     .spacing([40.0, 5.0])
@@ -167,11 +175,11 @@ impl ResultsPanel {
                         ui.label("Total Files:");
                         ui.label(RichText::new(format!("{}", summary.total_files)).strong());
                         ui.end_row();
-                        
+
                         ui.label("Total Size:");
                         ui.label(RichText::new(format_bytes(summary.total_bytes)).strong());
                         ui.end_row();
-                        
+
                         ui.label("String Artefacts:");
                         ui.label(RichText::new(format!("{}", summary.string_artefacts)).strong());
                         ui.end_row();
@@ -183,10 +191,10 @@ impl ResultsPanel {
             // Files by type
             ui.group(|ui| {
                 ui.label(RichText::new("Files by Type").strong());
-                
+
                 let mut sorted_types: Vec<_> = summary.by_type.iter().collect();
                 sorted_types.sort_by(|a, b| b.1.cmp(a.1));
-                
+
                 egui::Grid::new("types_grid")
                     .num_columns(2)
                     .spacing([20.0, 5.0])
@@ -206,7 +214,7 @@ impl ResultsPanel {
         ui.horizontal(|ui| {
             ui.label("Filter:");
             ui.text_edit_singleline(&mut self.search_query);
-            
+
             if ui.button("Clear").clicked() {
                 self.search_query.clear();
                 self.type_filter = None;
@@ -215,18 +223,23 @@ impl ResultsPanel {
 
         ui.horizontal(|ui| {
             ui.label("Type:");
-            if ui.selectable_label(self.type_filter.is_none(), "All").clicked() {
+            if ui
+                .selectable_label(self.type_filter.is_none(), "All")
+                .clicked()
+            {
                 self.type_filter = None;
             }
-            
+
             // Get unique types
-            let mut types: Vec<_> = self.files.iter()
+            let mut types: Vec<_> = self
+                .files
+                .iter()
                 .map(|f| f.file_type.as_str())
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();
             types.sort();
-            
+
             for file_type in types {
                 let selected = self.type_filter.as_deref() == Some(file_type);
                 if ui.selectable_label(selected, file_type).clicked() {
@@ -238,7 +251,9 @@ impl ResultsPanel {
         ui.separator();
 
         // Filtered files
-        let filtered: Vec<_> = self.files.iter()
+        let filtered: Vec<_> = self
+            .files
+            .iter()
             .enumerate()
             .filter(|(_, f)| {
                 if let Some(ref type_filter) = self.type_filter {
@@ -246,16 +261,23 @@ impl ResultsPanel {
                         return false;
                     }
                 }
-                if !self.search_query.is_empty() {
-                    if !f.output_path.to_lowercase().contains(&self.search_query.to_lowercase()) {
-                        return false;
-                    }
+                if !self.search_query.is_empty()
+                    && !f
+                        .output_path
+                        .to_lowercase()
+                        .contains(&self.search_query.to_lowercase())
+                {
+                    return false;
                 }
                 true
             })
             .collect();
 
-        ui.label(format!("Showing {} of {} files", filtered.len(), self.files.len()));
+        ui.label(format!(
+            "Showing {} of {} files",
+            filtered.len(),
+            self.files.len()
+        ));
 
         // File list
         egui::ScrollArea::vertical()
@@ -273,12 +295,15 @@ impl ResultsPanel {
                         ui.label(RichText::new("Size").strong());
                         ui.label(RichText::new("Path").strong());
                         ui.end_row();
-                        
+
                         // Files
                         for (idx, file) in filtered.iter().take(500) {
                             let selected = self.selected_file == Some(*idx);
-                            
-                            if ui.selectable_label(selected, format!("{}", file.id)).clicked() {
+
+                            if ui
+                                .selectable_label(selected, format!("{}", file.id))
+                                .clicked()
+                            {
                                 self.selected_file = Some(*idx);
                             }
                             ui.label(&file.file_type);
@@ -287,7 +312,7 @@ impl ResultsPanel {
                             ui.label(&file.output_path);
                             ui.end_row();
                         }
-                        
+
                         if filtered.len() > 500 {
                             ui.label("...");
                             ui.label(format!("({} more files)", filtered.len() - 500));
@@ -301,10 +326,10 @@ impl ResultsPanel {
             if let Some(file) = self.files.get(idx) {
                 ui.add_space(10.0);
                 ui.separator();
-                
+
                 ui.group(|ui| {
                     ui.label(RichText::new("File Details").strong());
-                    
+
                     egui::Grid::new("file_details")
                         .num_columns(2)
                         .spacing([20.0, 5.0])
@@ -312,35 +337,35 @@ impl ResultsPanel {
                             ui.label("ID:");
                             ui.label(format!("{}", file.id));
                             ui.end_row();
-                            
+
                             ui.label("Type:");
                             ui.label(&file.file_type);
                             ui.end_row();
-                            
+
                             ui.label("Offset:");
                             ui.label(format!("0x{:X} ({})", file.offset, file.offset));
                             ui.end_row();
-                            
+
                             ui.label("Size:");
                             ui.label(format_bytes(file.size));
                             ui.end_row();
-                            
+
                             ui.label("Path:");
                             ui.label(&file.output_path);
                             ui.end_row();
-                            
+
                             if let Some(sha256) = &file.sha256 {
                                 ui.label("SHA-256:");
                                 ui.label(sha256);
                                 ui.end_row();
                             }
-                            
+
                             if let (Some(w), Some(h)) = (file.width, file.height) {
                                 ui.label("Dimensions:");
                                 ui.label(format!("{}x{}", w, h));
                                 ui.end_row();
                             }
-                            
+
                             ui.label("Valid:");
                             ui.label(if file.is_valid { "Yes" } else { "No" });
                             ui.end_row();
@@ -365,16 +390,25 @@ impl ResultsPanel {
         ui.separator();
 
         // Filtered strings
-        let filtered: Vec<_> = self.strings.iter()
+        let filtered: Vec<_> = self
+            .strings
+            .iter()
             .filter(|s| {
                 if !self.search_query.is_empty() {
-                    return s.value.to_lowercase().contains(&self.search_query.to_lowercase());
+                    return s
+                        .value
+                        .to_lowercase()
+                        .contains(&self.search_query.to_lowercase());
                 }
                 true
             })
             .collect();
 
-        ui.label(format!("Showing {} of {} artefacts", filtered.len(), self.strings.len()));
+        ui.label(format!(
+            "Showing {} of {} artefacts",
+            filtered.len(),
+            self.strings.len()
+        ));
 
         egui::ScrollArea::vertical()
             .max_height(400.0)
@@ -390,13 +424,13 @@ impl ResultsPanel {
                         ui.label(RichText::new("Length").strong());
                         ui.label(RichText::new("Value").strong());
                         ui.end_row();
-                        
+
                         // Strings
                         for artefact in filtered.iter().take(500) {
                             ui.label(&artefact.artefact_type);
                             ui.label(format!("0x{:X}", artefact.offset));
                             ui.label(format!("{}", artefact.length));
-                            
+
                             // Truncate long values
                             let display_value = if artefact.value.len() > 80 {
                                 format!("{}...", &artefact.value[..80])
@@ -406,7 +440,7 @@ impl ResultsPanel {
                             ui.label(display_value);
                             ui.end_row();
                         }
-                        
+
                         if filtered.len() > 500 {
                             ui.label("...");
                             ui.label(format!("({} more artefacts)", filtered.len() - 500));
@@ -444,7 +478,7 @@ mod tests {
             width: None,
             height: None,
         });
-        
+
         panel.clear();
         assert!(panel.files.is_empty());
     }

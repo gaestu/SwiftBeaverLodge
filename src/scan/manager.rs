@@ -1,15 +1,18 @@
 //! Scan manager - subprocess execution and monitoring
 
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::io::{BufRead, BufReader};
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 
+use super::{
+    find_swiftbeaver_binary_for_variant, progress::parse_json_log, LogEntry, ScanProgress,
+    ScanState,
+};
 use crate::config::ScanConfig;
-use super::{ScanState, ScanProgress, LogEntry, find_swiftbeaver_binary_for_variant, progress::parse_json_log};
 
 /// Messages from scan thread to UI
 #[derive(Debug, Clone)]
@@ -19,7 +22,10 @@ pub enum ScanMessage {
     StateChange(ScanState),
     Error(String),
     /// Run output path from swiftbeaver's "starting" log
-    RunOutputPath { run_id: String, output_path: String },
+    RunOutputPath {
+        run_id: String,
+        output_path: String,
+    },
 }
 
 /// Manages scan lifecycle
@@ -30,10 +36,10 @@ pub struct ScanManager {
     progress: Option<ScanProgress>,
     logs: Vec<LogEntry>,
     error: Option<String>,
-    
+
     /// Channel to receive messages from scan thread
     message_rx: Option<Receiver<ScanMessage>>,
-    
+
     /// Sender to request cancellation
     cancel_tx: Option<Sender<()>>,
 }
@@ -78,7 +84,7 @@ impl ScanManager {
         // Check if we have a receiver
         let should_cleanup = if let Some(rx) = &self.message_rx {
             let mut cleanup = false;
-            
+
             // Drain all pending messages (non-blocking)
             while let Ok(msg) = rx.try_recv() {
                 match msg {
@@ -98,7 +104,10 @@ impl ScanManager {
                     ScanMessage::Error(e) => {
                         self.error = Some(e);
                     }
-                    ScanMessage::RunOutputPath { run_id, output_path } => {
+                    ScanMessage::RunOutputPath {
+                        run_id,
+                        output_path,
+                    } => {
                         // Update to the actual path from swiftbeaver
                         self.run_id = Some(run_id);
                         self.run_output_path = Some(output_path);
@@ -109,7 +118,7 @@ impl ScanManager {
         } else {
             false
         };
-        
+
         // Cleanup channels after borrow is released
         if should_cleanup {
             self.message_rx = None;
@@ -123,13 +132,23 @@ impl ScanManager {
             bail!("Scan already in progress");
         }
 
+        // Reject configurations with unsafe or contradictory flag combinations
+        // before any filesystem mutation or subprocess spawn. This protects
+        // forensic safety even when callers bypass the UI validation panel.
+        let combo_issues = crate::config::validate_flag_combinations(&config);
+        if !combo_issues.is_empty() {
+            bail!("Invalid scan configuration: {}", combo_issues.join("; "));
+        }
+
         // Find binary for selected GPU variant
-        let binary_path = find_swiftbeaver_binary_for_variant(config.gpu_variant)
-            .with_context(|| format!(
-                "swiftbeaver-{} binary not found. Run: ./download-swiftbeaver.sh {}",
-                config.gpu_variant.as_str(),
-                config.gpu_variant.as_str()
-            ))?;
+        let binary_path =
+            find_swiftbeaver_binary_for_variant(config.gpu_variant).with_context(|| {
+                format!(
+                    "swiftbeaver-{} binary not found. Run: ./download-swiftbeaver.sh {}",
+                    config.gpu_variant.as_str(),
+                    config.gpu_variant.as_str()
+                )
+            })?;
 
         // Validate paths
         if !PathBuf::from(&config.input_path).exists() {
@@ -156,8 +175,12 @@ impl ScanManager {
         // Build command arguments
         let args = build_cli_args(&config);
 
-        tracing::info!("Starting swiftbeaver: {} {}", binary_path.display(), args.join(" "));
-        
+        tracing::info!(
+            "Starting swiftbeaver: {} {}",
+            binary_path.display(),
+            args.join(" ")
+        );
+
         self.logs.push(LogEntry {
             timestamp: Utc::now().to_rfc3339(),
             level: "INFO".to_string(),
@@ -210,7 +233,10 @@ fn run_scan_thread(
     let mut child = match child_result {
         Ok(c) => c,
         Err(e) => {
-            let _ = message_tx.send(ScanMessage::Error(format!("Failed to spawn swiftbeaver: {}", e)));
+            let _ = message_tx.send(ScanMessage::Error(format!(
+                "Failed to spawn swiftbeaver: {}",
+                e
+            )));
             let _ = message_tx.send(ScanMessage::StateChange(ScanState::Failed));
             return;
         }
@@ -232,7 +258,7 @@ fn run_scan_thread(
             return;
         }
     };
-    
+
     let stderr = match child.stderr.take() {
         Some(s) => s,
         None => {
@@ -244,7 +270,7 @@ fn run_scan_thread(
 
     let stdout_reader = BufReader::new(stdout);
     let stderr_reader = BufReader::new(stderr);
-    
+
     // Clone for stderr thread
     let message_tx_stderr = message_tx.clone();
 
@@ -285,15 +311,17 @@ fn run_scan_thread(
                 }
             } else if event_type == "starting" {
                 // Extract run_id and output path from starting message
-                let run_id = payload.get("run_id")
+                let run_id = payload
+                    .get("run_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let output_path = payload.get("output")
+                let output_path = payload
+                    .get("output")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                
+
                 if !output_path.is_empty() {
                     let _ = message_tx.send(ScanMessage::RunOutputPath {
                         run_id: run_id.clone(),
@@ -307,10 +335,11 @@ fn run_scan_thread(
                 }
             } else {
                 // It's a log entry
-                let msg = payload.get("message")
+                let msg = payload
+                    .get("message")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&line);
-                
+
                 let _ = message_tx.send(ScanMessage::Log(LogEntry {
                     timestamp: Utc::now().to_rfc3339(),
                     level: event_type.to_uppercase(),
@@ -352,9 +381,10 @@ fn run_scan_thread(
                 ScanState::Completed
             }
             Ok(s) => {
-                let _ = message_tx.send(ScanMessage::Error(
-                    format!("Process exited with code: {:?}", s.code())
-                ));
+                let _ = message_tx.send(ScanMessage::Error(format!(
+                    "Process exited with code: {:?}",
+                    s.code()
+                )));
                 let _ = message_tx.send(ScanMessage::Log(LogEntry {
                     timestamp: Utc::now().to_rfc3339(),
                     level: "ERROR".to_string(),
@@ -395,6 +425,12 @@ fn build_cli_args(config: &ScanConfig) -> Vec<String> {
         config.metadata_backend.as_str().to_string(),
     ];
 
+    // Optional YAML config file (merged with CLI flags by SwiftBeaver)
+    if let Some(path) = config.config_path.as_ref().filter(|p| !p.is_empty()) {
+        args.push("--config-path".to_string());
+        args.push(path.clone());
+    }
+
     // File types
     if !config.file_types.is_empty() {
         args.push("--types".to_string());
@@ -421,6 +457,26 @@ fn build_cli_args(config: &ScanConfig) -> Vec<String> {
     if !config.scan_phones {
         args.push("--no-scan-phones".to_string());
     }
+    if config.string_min_len > 0 && config.string_min_len != ScanConfig::default().string_min_len {
+        args.push("--string-min-len".to_string());
+        args.push(config.string_min_len.to_string());
+    }
+
+    // Entropy
+    if config.scan_entropy {
+        args.push("--scan-entropy".to_string());
+        if let Some(window) = config.entropy_window_bytes {
+            args.push("--entropy-window-bytes".to_string());
+            args.push(window.to_string());
+        }
+        // Only emit threshold when it differs from the default to avoid
+        // overriding SwiftBeaver's tuned default unintentionally.
+        if (config.entropy_threshold - ScanConfig::default().entropy_threshold).abs() > f64::EPSILON
+        {
+            args.push("--entropy-threshold".to_string());
+            args.push(format!("{}", config.entropy_threshold));
+        }
+    }
 
     // GPU
     if config.gpu_enabled {
@@ -431,11 +487,19 @@ fn build_cli_args(config: &ScanConfig) -> Vec<String> {
     if config.compute_evidence_hash {
         args.push("--compute-evidence-sha256".to_string());
     }
+    if let Some(hash) = config.evidence_sha256.as_ref().filter(|h| !h.is_empty()) {
+        args.push("--evidence-sha256".to_string());
+        args.push(hash.clone());
+    }
 
     // Resource limits
     if let Some(max_bytes) = config.max_bytes {
         args.push("--max-bytes".to_string());
         args.push(max_bytes.to_string());
+    }
+    if let Some(max_chunks) = config.max_chunks {
+        args.push("--max-chunks".to_string());
+        args.push(max_chunks.to_string());
     }
     if let Some(max_files) = config.max_files {
         args.push("--max-files".to_string());
@@ -445,11 +509,71 @@ fn build_cli_args(config: &ScanConfig) -> Vec<String> {
         args.push("--max-memory-mib".to_string());
         args.push(max_memory.to_string());
     }
+    if let Some(max_open) = config.max_open_files {
+        args.push("--max-open-files".to_string());
+        args.push(max_open.to_string());
+    }
 
     // Workers
     if config.workers > 0 {
         args.push("--workers".to_string());
         args.push(config.workers.to_string());
+    }
+    if config.scan_workers > 0 {
+        args.push("--scan-workers".to_string());
+        args.push(config.scan_workers.to_string());
+    }
+    if config.carve_workers > 0 {
+        args.push("--carve-workers".to_string());
+        args.push(config.carve_workers.to_string());
+    }
+    if config.write_workers > 0 {
+        args.push("--write-workers".to_string());
+        args.push(config.write_workers.to_string());
+    }
+
+    // Chunk overlap (chunk_size_mib uses SwiftBeaver's default unless set explicitly elsewhere)
+    if let Some(overlap) = config.overlap_kib {
+        args.push("--overlap-kib".to_string());
+        args.push(overlap.to_string());
+    }
+
+    // Run mode
+    if config.dry_run {
+        args.push("--dry-run".to_string());
+    }
+    if config.metadata_only {
+        args.push("--metadata-only".to_string());
+    }
+
+    // Post-carving validation
+    if config.validate_carved {
+        args.push("--validate-carved".to_string());
+    }
+    if config.remove_invalid {
+        args.push("--remove-invalid".to_string());
+    }
+
+    // Hashing & dedup
+    if !config.hash_algorithms.is_empty() {
+        args.push("--hash-algorithms".to_string());
+        args.push(config.hash_algorithms.join(","));
+    }
+    if config.dedupe {
+        args.push("--dedupe".to_string());
+    }
+    if config.skip_duplicates {
+        args.push("--skip-duplicates".to_string());
+    }
+
+    // Checkpoint / resume
+    if let Some(path) = config.checkpoint_path.as_ref().filter(|p| !p.is_empty()) {
+        args.push("--checkpoint-path".to_string());
+        args.push(path.clone());
+    }
+    if let Some(path) = config.resume_from.as_ref().filter(|p| !p.is_empty()) {
+        args.push("--resume-from".to_string());
+        args.push(path.clone());
     }
 
     args
@@ -474,9 +598,9 @@ mod tests {
             output_path: "/tmp/output".to_string(),
             ..Default::default()
         };
-        
+
         let args = build_cli_args(&config);
-        
+
         assert!(args.contains(&"--input".to_string()));
         assert!(args.contains(&"/tmp/test.dd".to_string()));
         assert!(args.contains(&"--output".to_string()));
@@ -496,9 +620,9 @@ mod tests {
             max_files: Some(1000),
             ..Default::default()
         };
-        
+
         let args = build_cli_args(&config);
-        
+
         assert!(args.contains(&"--scan-strings".to_string()));
         assert!(args.contains(&"--gpu".to_string()));
         assert!(args.contains(&"--max-files".to_string()));
@@ -511,5 +635,265 @@ mod tests {
         assert_eq!(manager.state(), ScanState::Idle);
         assert!(manager.progress().is_none());
         assert!(manager.logs().is_empty());
+    }
+
+    /// Helper: locate a single-arg flag and return its value.
+    fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        let idx = args.iter().position(|a| a == flag)?;
+        args.get(idx + 1).map(|s| s.as_str())
+    }
+
+    #[test]
+    fn test_build_cli_args_default_does_not_emit_optional_flags() {
+        let config = ScanConfig {
+            input_path: "/tmp/test.dd".to_string(),
+            output_path: "/tmp/output".to_string(),
+            ..Default::default()
+        };
+        let args = build_cli_args(&config);
+
+        // None of the new optional flags should appear by default.
+        for flag in [
+            "--config-path",
+            "--scan-workers",
+            "--carve-workers",
+            "--write-workers",
+            "--overlap-kib",
+            "--string-min-len",
+            "--scan-entropy",
+            "--entropy-window-bytes",
+            "--entropy-threshold",
+            "--max-chunks",
+            "--max-open-files",
+            "--checkpoint-path",
+            "--resume-from",
+            "--evidence-sha256",
+            "--dry-run",
+            "--metadata-only",
+            "--validate-carved",
+            "--remove-invalid",
+            "--hash-algorithms",
+            "--dedupe",
+            "--skip-duplicates",
+        ] {
+            assert!(
+                !args.iter().any(|a| a == flag),
+                "default args unexpectedly contain {flag}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_cli_args_advanced_options_snapshot() {
+        let config = ScanConfig {
+            input_path: "/evidence/disk.dd".to_string(),
+            output_path: "/out".to_string(),
+            config_path: Some("/etc/swiftbeaver.yaml".to_string()),
+            evidence_sha256: Some("deadbeef".to_string()),
+            scan_workers: 4,
+            carve_workers: 8,
+            write_workers: 2,
+            workers: 16,
+            overlap_kib: Some(128),
+            string_min_len: 12,
+            scan_entropy: true,
+            entropy_window_bytes: Some(4096),
+            entropy_threshold: 6.5,
+            max_chunks: Some(10),
+            max_open_files: Some(2048),
+            checkpoint_path: Some("/var/tmp/run.ckpt".to_string()),
+            resume_from: Some("/var/tmp/run.ckpt".to_string()),
+            dry_run: false,
+            metadata_only: true,
+            validate_carved: true,
+            remove_invalid: true,
+            hash_algorithms: vec!["md5".to_string(), "sha256".to_string()],
+            dedupe: true,
+            skip_duplicates: true,
+            ..Default::default()
+        };
+
+        let args = build_cli_args(&config);
+
+        assert_eq!(
+            flag_value(&args, "--config-path"),
+            Some("/etc/swiftbeaver.yaml")
+        );
+        assert_eq!(flag_value(&args, "--evidence-sha256"), Some("deadbeef"));
+        assert_eq!(flag_value(&args, "--workers"), Some("16"));
+        assert_eq!(flag_value(&args, "--scan-workers"), Some("4"));
+        assert_eq!(flag_value(&args, "--carve-workers"), Some("8"));
+        assert_eq!(flag_value(&args, "--write-workers"), Some("2"));
+        assert_eq!(flag_value(&args, "--overlap-kib"), Some("128"));
+        assert_eq!(flag_value(&args, "--string-min-len"), Some("12"));
+        assert!(args.iter().any(|a| a == "--scan-entropy"));
+        assert_eq!(flag_value(&args, "--entropy-window-bytes"), Some("4096"));
+        assert_eq!(flag_value(&args, "--entropy-threshold"), Some("6.5"));
+        assert_eq!(flag_value(&args, "--max-chunks"), Some("10"));
+        assert_eq!(flag_value(&args, "--max-open-files"), Some("2048"));
+        assert_eq!(
+            flag_value(&args, "--checkpoint-path"),
+            Some("/var/tmp/run.ckpt")
+        );
+        assert_eq!(
+            flag_value(&args, "--resume-from"),
+            Some("/var/tmp/run.ckpt")
+        );
+        assert!(args.iter().any(|a| a == "--metadata-only"));
+        assert!(!args.iter().any(|a| a == "--dry-run"));
+        assert!(args.iter().any(|a| a == "--validate-carved"));
+        assert!(args.iter().any(|a| a == "--remove-invalid"));
+        assert_eq!(flag_value(&args, "--hash-algorithms"), Some("md5,sha256"));
+        assert!(args.iter().any(|a| a == "--dedupe"));
+        assert!(args.iter().any(|a| a == "--skip-duplicates"));
+    }
+
+    #[test]
+    fn test_build_cli_args_empty_optional_strings_are_skipped() {
+        let config = ScanConfig {
+            input_path: "/tmp/test.dd".to_string(),
+            output_path: "/tmp/output".to_string(),
+            config_path: Some(String::new()),
+            evidence_sha256: Some(String::new()),
+            checkpoint_path: Some(String::new()),
+            resume_from: Some(String::new()),
+            ..Default::default()
+        };
+        let args = build_cli_args(&config);
+        for flag in [
+            "--config-path",
+            "--evidence-sha256",
+            "--checkpoint-path",
+            "--resume-from",
+        ] {
+            assert!(
+                !args.iter().any(|a| a == flag),
+                "empty optional emitted {flag}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_cli_args_entropy_window_only_when_scan_entropy_enabled() {
+        let config = ScanConfig {
+            input_path: "/tmp/x".to_string(),
+            output_path: "/tmp/o".to_string(),
+            scan_entropy: false,
+            entropy_window_bytes: Some(8192),
+            ..Default::default()
+        };
+        let args = build_cli_args(&config);
+        assert!(!args.iter().any(|a| a == "--entropy-window-bytes"));
+        assert!(!args.iter().any(|a| a == "--scan-entropy"));
+    }
+
+    #[test]
+    fn test_validate_flag_combinations_detects_invalid_pairs() {
+        use crate::config::validate_flag_combinations;
+
+        let config = ScanConfig {
+            dry_run: true,
+            metadata_only: true,
+            validate_carved: false,
+            remove_invalid: true,
+            dedupe: false,
+            skip_duplicates: true,
+            hash_algorithms: vec!["sha1".to_string()],
+            ..Default::default()
+        };
+
+        let issues = validate_flag_combinations(&config);
+        assert!(issues
+            .iter()
+            .any(|i| i.contains("dry-run") && i.contains("metadata-only")));
+        assert!(issues.iter().any(|i| i.contains("--remove-invalid")));
+        assert!(issues.iter().any(|i| i.contains("--skip-duplicates")));
+        assert!(issues.iter().any(|i| i.contains("sha1")));
+    }
+
+    #[test]
+    fn test_validate_flag_combinations_accepts_valid_combo() {
+        use crate::config::validate_flag_combinations;
+
+        let config = ScanConfig {
+            dry_run: false,
+            metadata_only: true,
+            validate_carved: true,
+            remove_invalid: true,
+            dedupe: true,
+            skip_duplicates: true,
+            hash_algorithms: vec!["MD5".to_string(), "sha256".to_string()],
+            ..Default::default()
+        };
+        assert!(validate_flag_combinations(&config).is_empty());
+    }
+
+    #[test]
+    fn test_validate_flag_combinations_rejects_checkpoint_on_evidence() {
+        use crate::config::validate_flag_combinations;
+
+        let config = ScanConfig {
+            input_path: "/evidence/disk.dd".to_string(),
+            checkpoint_path: Some("/evidence/disk.dd".to_string()),
+            ..Default::default()
+        };
+        let issues = validate_flag_combinations(&config);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("--checkpoint-path") && i.contains("evidence")),
+            "expected evidence-overwrite rejection, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_flag_combinations_rejects_checkpoint_on_raw_device() {
+        use crate::config::validate_flag_combinations;
+
+        let config = ScanConfig {
+            input_path: "/dev/sda".to_string(),
+            checkpoint_path: Some("/dev/sdb".to_string()),
+            ..Default::default()
+        };
+        let issues = validate_flag_combinations(&config);
+        assert!(
+            issues.iter().any(|i| i.contains("raw block device")),
+            "expected raw-device rejection, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_flag_combinations_allows_safe_checkpoint_path() {
+        use crate::config::validate_flag_combinations;
+
+        let config = ScanConfig {
+            input_path: "/evidence/disk.dd".to_string(),
+            checkpoint_path: Some("/var/tmp/run.ckpt".to_string()),
+            ..Default::default()
+        };
+        assert!(validate_flag_combinations(&config).is_empty());
+    }
+
+    #[test]
+    fn test_start_rejects_unsafe_checkpoint_before_spawning() {
+        let mut manager = ScanManager::new();
+        let config = ScanConfig {
+            // Intentionally point input at a likely-existing path so we know
+            // failure comes from the validator, not the path-existence check.
+            input_path: "/tmp".to_string(),
+            output_path: "/tmp/sblodge_test_output".to_string(),
+            checkpoint_path: Some("/dev/null".to_string()),
+            ..Default::default()
+        };
+
+        let err = manager
+            .start(config)
+            .expect_err("start() must reject raw-device checkpoint paths");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Invalid scan configuration") && msg.contains("raw block device"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(manager.state(), ScanState::Idle);
     }
 }

@@ -39,3 +39,6 @@ Thumbs.db
 *.profraw
 *.profdata
 /coverage/
+
+# ai files
+.codex

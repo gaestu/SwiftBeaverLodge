@@ -6,7 +6,7 @@ pub mod progress;
 use crate::config::GpuVariant;
 
 pub use manager::ScanManager;
-pub use progress::{ScanProgress, format_bytes};
+pub use progress::{format_bytes, ScanProgress};
 
 /// Scan state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,12 +34,9 @@ pub fn get_swiftbeaver_version() -> String {
 /// Get swiftbeaver binary version for a specific variant
 pub fn get_swiftbeaver_version_for_variant(variant: GpuVariant) -> String {
     let binary_path = find_swiftbeaver_binary_for_variant(variant);
-    
+
     if let Some(path) = binary_path {
-        if let Ok(output) = std::process::Command::new(&path)
-            .arg("--version")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new(&path).arg("--version").output() {
             if output.status.success() {
                 let version = String::from_utf8_lossy(&output.stdout);
                 return version
@@ -50,20 +47,20 @@ pub fn get_swiftbeaver_version_for_variant(variant: GpuVariant) -> String {
             }
         }
     }
-    
+
     "not installed".to_string()
 }
 
 /// Get list of available (installed) GPU variants
 pub fn get_available_variants() -> Vec<GpuVariant> {
     let mut available = Vec::new();
-    
+
     for variant in [GpuVariant::CpuOnly, GpuVariant::OpenCL, GpuVariant::Cuda] {
         if find_swiftbeaver_binary_for_variant(variant).is_some() {
             available.push(variant);
         }
     }
-    
+
     available
 }
 
@@ -75,7 +72,7 @@ pub fn is_variant_available(variant: GpuVariant) -> bool {
 /// Find the swiftbeaver binary for a specific GPU variant
 pub fn find_swiftbeaver_binary_for_variant(variant: GpuVariant) -> Option<std::path::PathBuf> {
     let binary_name = format!("swiftbeaver-{}", variant.as_str());
-    
+
     // 1. Check in bin/ directory relative to executable
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
@@ -85,13 +82,13 @@ pub fn find_swiftbeaver_binary_for_variant(variant: GpuVariant) -> Option<std::p
             }
         }
     }
-    
+
     // 2. Check current directory bin/
     let cwd_bin = std::path::PathBuf::from(format!("bin/{}", binary_name));
     if cwd_bin.exists() {
         return Some(cwd_bin);
     }
-    
+
     // 3. Check PATH
     which::which(&binary_name).ok()
 }
@@ -104,18 +101,16 @@ pub fn find_swiftbeaver_binary() -> Option<std::path::PathBuf> {
             return Some(path);
         }
     }
-    
+
     // Fallback: check for generic "swiftbeaver" (symlink or legacy)
-    let locations = [
-        std::path::PathBuf::from("bin/swiftbeaver"),
-    ];
-    
+    let locations = [std::path::PathBuf::from("bin/swiftbeaver")];
+
     for path in locations {
         if path.exists() {
             return Some(path);
         }
     }
-    
+
     // Check PATH
     which::which("swiftbeaver").ok()
 }
@@ -146,7 +141,7 @@ mod tests {
         // This test just ensures the function doesn't panic
         let _ = find_swiftbeaver_binary();
     }
-    
+
     #[test]
     fn test_get_available_variants() {
         // This test just ensures the function doesn't panic
@@ -154,7 +149,7 @@ mod tests {
         // variants may be empty if no binaries installed
         assert!(variants.len() <= 3);
     }
-    
+
     #[test]
     fn test_find_variant_binary() {
         // This test just ensures the function doesn't panic

@@ -62,7 +62,9 @@ impl FileType {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
             "jpeg" | "jpg" | "png" | "gif" | "bmp" | "webp" | "ico" | "tiff" => FileType::Image,
-            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "rtf" => FileType::Document,
+            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "rtf" => {
+                FileType::Document
+            }
             "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" => FileType::Archive,
             "sqlite" | "db" | "mdb" => FileType::Database,
             "mp3" | "mp4" | "avi" | "mkv" | "wav" | "flac" | "ogg" => FileType::Media,

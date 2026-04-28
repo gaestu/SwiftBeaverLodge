@@ -1,8 +1,8 @@
 //! Progress monitoring panel
 
-use egui::{Ui, RichText, Color32, ProgressBar};
+use egui::{Color32, ProgressBar, RichText, Ui};
 
-use crate::scan::{ScanState, ScanProgress, LogEntry, format_bytes};
+use crate::scan::{format_bytes, LogEntry, ScanProgress, ScanState};
 
 /// Progress monitoring panel
 pub struct ProgressPanel;
@@ -38,7 +38,7 @@ impl ProgressPanel {
                 ScanState::Failed => ("Failed", Color32::RED),
                 ScanState::Cancelled => ("Cancelled", Color32::YELLOW),
             };
-            
+
             ui.label("Status:");
             ui.label(RichText::new(status_text).color(status_color).strong());
         });
@@ -64,14 +64,14 @@ impl ProgressPanel {
         // Progress bar
         ui.group(|ui| {
             ui.label(RichText::new("Scan Progress").strong());
-            
+
             let pct = progress.percentage() / 100.0;
             ui.add(
                 ProgressBar::new(pct)
                     .text(format!("{:.1}%", progress.percentage()))
-                    .animate(true)
+                    .animate(true),
             );
-            
+
             ui.horizontal(|ui| {
                 ui.label(format!(
                     "{} / {}",
@@ -86,7 +86,7 @@ impl ProgressPanel {
         // Statistics grid
         ui.group(|ui| {
             ui.label(RichText::new("Statistics").strong());
-            
+
             egui::Grid::new("progress_stats")
                 .num_columns(2)
                 .spacing([40.0, 5.0])
@@ -94,15 +94,15 @@ impl ProgressPanel {
                     ui.label("Signature Hits:");
                     ui.label(RichText::new(format!("{}", progress.hits)).strong());
                     ui.end_row();
-                    
+
                     ui.label("Files Carved:");
                     ui.label(RichText::new(format!("{}", progress.files)).strong());
                     ui.end_row();
-                    
+
                     ui.label("Throughput:");
                     ui.label(RichText::new(format!("{:.2} MiB/s", progress.rate_mib)).strong());
                     ui.end_row();
-                    
+
                     ui.label("ETA:");
                     ui.label(RichText::new(progress.eta_formatted()).strong());
                     ui.end_row();
@@ -116,9 +116,9 @@ impl ProgressPanel {
                 ui.label(RichText::new("Log Output").strong());
                 ui.label(format!("({} entries)", logs.len()));
             });
-            
+
             ui.add_space(5.0);
-            
+
             // Scrollable log area
             egui::ScrollArea::vertical()
                 .max_height(300.0)
@@ -135,17 +135,17 @@ impl ProgressPanel {
                                 "DEBUG" => Color32::DARK_GRAY,
                                 _ => Color32::GRAY,
                             };
-                            
+
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(&entry.timestamp)
                                         .small()
-                                        .color(Color32::DARK_GRAY)
+                                        .color(Color32::DARK_GRAY),
                                 );
                                 ui.label(
                                     RichText::new(format!("[{}]", entry.level))
                                         .small()
-                                        .color(color)
+                                        .color(color),
                                 );
                                 ui.label(&entry.message);
                             });
@@ -171,7 +171,7 @@ mod tests {
             rate_mib: 150.5,
             eta_secs: Some(300),
         };
-        
+
         assert!((progress.percentage() - 50.0).abs() < 0.1);
     }
 
@@ -181,7 +181,7 @@ mod tests {
             eta_secs: Some(3661),
             ..Default::default()
         };
-        
+
         assert_eq!(progress.eta_formatted(), "1h 1m");
     }
 
@@ -191,7 +191,7 @@ mod tests {
             eta_secs: None,
             ..Default::default()
         };
-        
+
         assert_eq!(progress.eta_formatted(), "calculating...");
     }
 }

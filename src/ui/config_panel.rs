@@ -1,9 +1,12 @@
 //! Configuration panel for scan settings
 
-use egui::{Ui, RichText, Color32};
+use egui::{Color32, RichText, Ui};
 use rfd::FileDialog;
 
-use crate::config::{ScanConfig, MetadataBackend, GpuVariant, FILE_TYPES};
+use crate::config::{
+    validate_flag_combinations, GpuVariant, MetadataBackend, ScanConfig, FILE_TYPES,
+    SUPPORTED_HASH_ALGORITHMS,
+};
 use crate::devices::{list_block_devices, BlockDevice, DeviceType};
 use crate::scan::{get_available_variants, is_variant_available};
 
@@ -42,20 +45,24 @@ impl ConfigPanel {
             show_partitions: false,
         }
     }
-    
+
     /// Refresh the cached device list
     fn refresh_devices(&mut self) {
         self.cached_devices = list_block_devices();
     }
-    
+
     /// Get filtered devices based on show_partitions setting
     fn get_filtered_devices(&self) -> Vec<&BlockDevice> {
-        self.cached_devices.iter()
+        self.cached_devices
+            .iter()
             .filter(|d| {
                 if self.show_partitions {
                     true
                 } else {
-                    matches!(d.device_type, DeviceType::Disk | DeviceType::NVMe | DeviceType::Loop)
+                    matches!(
+                        d.device_type,
+                        DeviceType::Disk | DeviceType::NVMe | DeviceType::Loop
+                    )
                 }
             })
             .collect()
@@ -70,15 +77,19 @@ impl ConfigPanel {
             // Evidence source selection
             ui.group(|ui| {
                 ui.label(RichText::new("Evidence Source").strong());
-                
+
                 // Source type selector
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.input_source, InputSource::File, "📄 File/Image");
-                    ui.selectable_value(&mut self.input_source, InputSource::Device, "💾 Raw Device");
+                    ui.selectable_value(
+                        &mut self.input_source,
+                        InputSource::Device,
+                        "💾 Raw Device",
+                    );
                 });
-                
+
                 ui.add_space(5.0);
-                
+
                 match self.input_source {
                     InputSource::File => {
                         // File input mode
@@ -86,12 +97,15 @@ impl ConfigPanel {
                             ui.add(
                                 egui::TextEdit::singleline(&mut config.input_path)
                                     .hint_text("Path to evidence file (.dd, .raw, .e01, etc.)")
-                                    .desired_width(380.0)
+                                    .desired_width(380.0),
                             );
                             if ui.button("Browse...").clicked() {
                                 if let Some(path) = FileDialog::new()
                                     .add_filter("All Files", &["*"])
-                                    .add_filter("Disk Images", &["dd", "raw", "img", "dmg", "e01", "E01"])
+                                    .add_filter(
+                                        "Disk Images",
+                                        &["dd", "raw", "img", "dmg", "e01", "E01"],
+                                    )
                                     .pick_file()
                                 {
                                     config.input_path = path.display().to_string();
@@ -107,24 +121,25 @@ impl ConfigPanel {
                             }
                             ui.checkbox(&mut self.show_partitions, "Show partitions");
                         });
-                        
+
                         // Initialize devices if empty
                         if self.cached_devices.is_empty() {
                             self.refresh_devices();
                         }
-                        
+
                         let filtered_devices = self.get_filtered_devices();
-                        
+
                         if filtered_devices.is_empty() {
                             ui.colored_label(Color32::YELLOW, "⚠ No block devices found");
                             ui.label(RichText::new("Run as root/sudo to access devices").weak());
                         } else {
                             // Device dropdown
-                            let current_device: String = filtered_devices.iter()
+                            let current_device: String = filtered_devices
+                                .iter()
                                 .find(|d| d.path.to_string_lossy() == config.input_path)
                                 .map(|d| d.display_name())
                                 .unwrap_or_else(|| "Select a device...".to_string());
-                            
+
                             egui::ComboBox::from_id_salt("device_selector")
                                 .width(450.0)
                                 .selected_text(&current_device)
@@ -132,41 +147,55 @@ impl ConfigPanel {
                                     for device in &filtered_devices {
                                         let icon = match device.device_type {
                                             DeviceType::Disk | DeviceType::NVMe => "💿",
-                                            DeviceType::Partition | DeviceType::NVMePartition => "📁",
+                                            DeviceType::Partition | DeviceType::NVMePartition => {
+                                                "📁"
+                                            }
                                             DeviceType::Loop => "🔄",
                                             DeviceType::Other => "📦",
                                         };
                                         let label = format!("{} {}", icon, device.display_name());
-                                        let is_selected = device.path.to_string_lossy() == config.input_path;
-                                        
+                                        let is_selected =
+                                            device.path.to_string_lossy() == config.input_path;
+
                                         if ui.selectable_label(is_selected, &label).clicked() {
-                                            config.input_path = device.path.to_string_lossy().to_string();
+                                            config.input_path =
+                                                device.path.to_string_lossy().to_string();
                                         }
                                     }
                                 });
-                            
+
                             // Show selected device info
-                            if let Some(device) = filtered_devices.iter()
-                                .find(|d| d.path.to_string_lossy() == config.input_path) 
+                            if let Some(device) = filtered_devices
+                                .iter()
+                                .find(|d| d.path.to_string_lossy() == config.input_path)
                             {
                                 ui.add_space(5.0);
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("Selected:").weak());
-                                    ui.label(&device.path.to_string_lossy().to_string());
-                                    ui.label(RichText::new(format!("({})", device.size_display)).weak());
+                                    ui.label(device.path.to_string_lossy().to_string());
+                                    ui.label(
+                                        RichText::new(format!("({})", device.size_display)).weak(),
+                                    );
                                     if device.removable {
-                                        ui.label(RichText::new("🔌 Removable").color(Color32::LIGHT_BLUE));
+                                        ui.label(
+                                            RichText::new("🔌 Removable")
+                                                .color(Color32::LIGHT_BLUE),
+                                        );
                                     }
                                 });
                             }
                         }
-                        
+
                         // Warning about permissions
                         ui.add_space(5.0);
-                        ui.label(RichText::new("⚠ Raw device access requires root/sudo privileges").weak().color(Color32::YELLOW));
+                        ui.label(
+                            RichText::new("⚠ Raw device access requires root/sudo privileges")
+                                .weak()
+                                .color(Color32::YELLOW),
+                        );
                     }
                 }
-                
+
                 // Manual path entry (always available)
                 ui.add_space(5.0);
                 ui.collapsing("Manual path entry", |ui| {
@@ -175,7 +204,7 @@ impl ConfigPanel {
                         ui.add(
                             egui::TextEdit::singleline(&mut config.input_path)
                                 .hint_text("/dev/sda or /path/to/image.dd")
-                                .desired_width(350.0)
+                                .desired_width(350.0),
                         );
                     });
                 });
@@ -190,7 +219,7 @@ impl ConfigPanel {
                     ui.add(
                         egui::TextEdit::singleline(&mut config.output_path)
                             .hint_text("Directory for carved files")
-                            .desired_width(400.0)
+                            .desired_width(400.0),
                     );
                     if ui.button("Browse...").clicked() {
                         if let Some(path) = FileDialog::new().pick_folder() {
@@ -206,7 +235,7 @@ impl ConfigPanel {
             ui.group(|ui| {
                 ui.label(RichText::new("File Types to Carve").strong());
                 ui.add_space(5.0);
-                
+
                 ui.horizontal(|ui| {
                     if ui.button("Select All").clicked() {
                         config.file_types.clear();
@@ -229,9 +258,9 @@ impl ConfigPanel {
                         ];
                     }
                 });
-                
+
                 ui.add_space(5.0);
-                
+
                 // Show file types by category
                 for (category, icon, types) in FILE_TYPES {
                     ui.horizontal(|ui| {
@@ -258,8 +287,16 @@ impl ConfigPanel {
             ui.group(|ui| {
                 ui.label(RichText::new("Metadata Format").strong());
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut config.metadata_backend, MetadataBackend::Parquet, "Parquet (recommended)");
-                    ui.selectable_value(&mut config.metadata_backend, MetadataBackend::Jsonl, "JSONL");
+                    ui.selectable_value(
+                        &mut config.metadata_backend,
+                        MetadataBackend::Parquet,
+                        "Parquet (recommended)",
+                    );
+                    ui.selectable_value(
+                        &mut config.metadata_backend,
+                        MetadataBackend::Jsonl,
+                        "JSONL",
+                    );
                     ui.selectable_value(&mut config.metadata_backend, MetadataBackend::Csv, "CSV");
                 });
             });
@@ -270,7 +307,7 @@ impl ConfigPanel {
             ui.group(|ui| {
                 ui.label(RichText::new("String Scanning").strong());
                 ui.checkbox(&mut config.scan_strings, "Enable string extraction");
-                
+
                 ui.add_enabled_ui(config.scan_strings, |ui| {
                     ui.indent("string_options", |ui| {
                         ui.checkbox(&mut config.scan_utf16, "Scan UTF-16 strings");
@@ -285,83 +322,97 @@ impl ConfigPanel {
 
             // Advanced options
             ui.collapsing("Advanced Options", |ui| {
-                ui.checkbox(&mut config.compute_evidence_hash, "Compute evidence SHA-256");
+                ui.checkbox(
+                    &mut config.compute_evidence_hash,
+                    "Compute evidence SHA-256",
+                );
                 ui.checkbox(&mut config.disable_zip, "Disable ZIP archive scanning");
-                
+
                 ui.add_space(10.0);
-                
+
                 // GPU Acceleration section
                 ui.label(RichText::new("GPU Variant").strong());
-                
+
                 // Get available variants
                 let available_variants = get_available_variants();
-                
+
                 // Show available variants status
                 if available_variants.is_empty() {
                     ui.colored_label(Color32::RED, "⚠ No swiftbeaver binaries found!");
                     ui.label(RichText::new("Run: ./download-swiftbeaver.sh").weak());
                 } else {
-                    let variant_names: Vec<&str> = available_variants.iter()
-                        .map(|v| v.as_str())
-                        .collect();
-                    ui.label(RichText::new(format!("Available: {}", variant_names.join(", "))).weak());
+                    let variant_names: Vec<&str> =
+                        available_variants.iter().map(|v| v.as_str()).collect();
+                    ui.label(
+                        RichText::new(format!("Available: {}", variant_names.join(", "))).weak(),
+                    );
                 }
-                
+
                 // GPU variant selection
                 ui.horizontal(|ui| {
                     ui.label("Use variant:");
                     egui::ComboBox::from_id_salt("gpu_variant")
                         .selected_text(config.gpu_variant.display_name())
                         .show_ui(ui, |ui| {
-                            for variant in [GpuVariant::CpuOnly, GpuVariant::OpenCL, GpuVariant::Cuda] {
+                            for variant in
+                                [GpuVariant::CpuOnly, GpuVariant::OpenCL, GpuVariant::Cuda]
+                            {
                                 let available = is_variant_available(variant);
                                 let label = if available {
                                     format!("✓ {}", variant.display_name())
                                 } else {
                                     format!("✗ {} (not installed)", variant.display_name())
                                 };
-                                
+
                                 // Only allow selection if available
-                                let response = ui.selectable_value(&mut config.gpu_variant, variant, &label);
+                                let response =
+                                    ui.selectable_value(&mut config.gpu_variant, variant, &label);
                                 if !available && response.clicked() {
                                     // Revert to previous if not available
-                                    config.gpu_variant = available_variants.first()
+                                    config.gpu_variant = available_variants
+                                        .first()
                                         .copied()
                                         .unwrap_or(GpuVariant::CpuOnly);
                                 }
                             }
                         });
                 });
-                
+
                 // Warn if selected variant is not available
                 if !is_variant_available(config.gpu_variant) {
                     ui.colored_label(
                         Color32::YELLOW,
-                        format!("⚠ {} not installed. Run: ./download-swiftbeaver.sh {}", 
+                        format!(
+                            "⚠ {} not installed. Run: ./download-swiftbeaver.sh {}",
                             config.gpu_variant.as_str(),
-                            config.gpu_variant.as_str())
+                            config.gpu_variant.as_str()
+                        ),
                     );
                 }
-                
+
                 // GPU enable checkbox (only if variant supports GPU)
-                let gpu_available = config.gpu_variant.supports_gpu() && is_variant_available(config.gpu_variant);
+                let gpu_available =
+                    config.gpu_variant.supports_gpu() && is_variant_available(config.gpu_variant);
                 ui.add_enabled_ui(gpu_available, |ui| {
                     ui.checkbox(&mut config.gpu_enabled, "Enable GPU acceleration (--gpu)");
                 });
-                
+
                 if !config.gpu_variant.supports_gpu() && config.gpu_enabled {
                     config.gpu_enabled = false;
                 }
-                
-                if config.gpu_variant.supports_gpu() && is_variant_available(config.gpu_variant) && !config.gpu_enabled {
+
+                if config.gpu_variant.supports_gpu()
+                    && is_variant_available(config.gpu_variant)
+                    && !config.gpu_enabled
+                {
                     ui.label(RichText::new("ℹ GPU variant selected but GPU disabled").weak());
                 }
-                
+
                 ui.add_space(10.0);
 
                 // Resource limits
                 ui.label(RichText::new("Resource Limits").strong());
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Max bytes to scan:");
                     let mut has_limit = config.max_bytes.is_some();
@@ -372,7 +423,7 @@ impl ConfigPanel {
                         ui.add(egui::DragValue::new(max).speed(1_000_000).prefix("bytes: "));
                     }
                 });
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Max files to carve:");
                     let mut has_limit = config.max_files.is_some();
@@ -383,7 +434,7 @@ impl ConfigPanel {
                         ui.add(egui::DragValue::new(max).speed(100));
                     }
                 });
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Max memory (MiB):");
                     let mut has_limit = config.max_memory_mib.is_some();
@@ -394,11 +445,268 @@ impl ConfigPanel {
                         ui.add(egui::DragValue::new(max).speed(100).range(256..=65536));
                     }
                 });
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Worker threads:");
-                    ui.add(egui::DragValue::new(&mut config.workers).speed(1).range(0..=64));
+                    ui.add(
+                        egui::DragValue::new(&mut config.workers)
+                            .speed(1)
+                            .range(0..=64),
+                    );
                     ui.label("(0 = auto)");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Scan workers:");
+                    ui.add(
+                        egui::DragValue::new(&mut config.scan_workers)
+                            .speed(1)
+                            .range(0..=64),
+                    );
+                    ui.label("Carve:");
+                    ui.add(
+                        egui::DragValue::new(&mut config.carve_workers)
+                            .speed(1)
+                            .range(0..=64),
+                    );
+                    ui.label("Write:");
+                    ui.add(
+                        egui::DragValue::new(&mut config.write_workers)
+                            .speed(1)
+                            .range(0..=64),
+                    );
+                    ui.label("(0 = inherit)");
+                });
+
+                ui.add_space(10.0);
+
+                // Chunk overlap
+                ui.label(RichText::new("Chunking").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Overlap (KiB):");
+                    let mut has_overlap = config.overlap_kib.is_some();
+                    if ui.checkbox(&mut has_overlap, "").changed() {
+                        config.overlap_kib = if has_overlap { Some(64) } else { None };
+                    }
+                    if let Some(ref mut v) = config.overlap_kib {
+                        ui.add(egui::DragValue::new(v).speed(1).range(0..=4096));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Max chunks:");
+                    let mut has = config.max_chunks.is_some();
+                    if ui.checkbox(&mut has, "").changed() {
+                        config.max_chunks = if has { Some(0) } else { None };
+                    }
+                    if let Some(ref mut v) = config.max_chunks {
+                        ui.add(egui::DragValue::new(v).speed(10));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Max open files:");
+                    let mut has = config.max_open_files.is_some();
+                    if ui.checkbox(&mut has, "").changed() {
+                        config.max_open_files = if has { Some(1024) } else { None };
+                    }
+                    if let Some(ref mut v) = config.max_open_files {
+                        ui.add(egui::DragValue::new(v).speed(16).range(16..=1_048_576));
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                // String length override
+                ui.label(RichText::new("String options").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Min string length:");
+                    ui.add(
+                        egui::DragValue::new(&mut config.string_min_len)
+                            .speed(1)
+                            .range(1..=128),
+                    );
+                });
+
+                ui.add_space(10.0);
+
+                // Entropy detection
+                ui.label(RichText::new("Entropy detection").strong());
+                ui.checkbox(
+                    &mut config.scan_entropy,
+                    "Enable entropy-based region detection",
+                );
+                ui.add_enabled_ui(config.scan_entropy, |ui| {
+                    ui.indent("entropy_options", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Threshold:");
+                            ui.add(
+                                egui::DragValue::new(&mut config.entropy_threshold)
+                                    .speed(0.05)
+                                    .range(0.0..=8.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Window bytes:");
+                            let mut has = config.entropy_window_bytes.is_some();
+                            if ui.checkbox(&mut has, "").changed() {
+                                config.entropy_window_bytes = if has { Some(4096) } else { None };
+                            }
+                            if let Some(ref mut v) = config.entropy_window_bytes {
+                                ui.add(egui::DragValue::new(v).speed(64).range(64..=1_048_576));
+                            }
+                        });
+                    });
+                });
+
+                ui.add_space(10.0);
+
+                // Run mode
+                ui.label(RichText::new("Run mode").strong());
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut config.dry_run, "Dry run (count only)")
+                        .changed()
+                        && config.dry_run
+                    {
+                        config.metadata_only = false;
+                    }
+                    if ui
+                        .checkbox(&mut config.metadata_only, "Metadata only")
+                        .changed()
+                        && config.metadata_only
+                    {
+                        config.dry_run = false;
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                // Validation & dedup
+                ui.label(RichText::new("Validation & dedup").strong());
+                ui.checkbox(
+                    &mut config.validate_carved,
+                    "Validate carved files (file magic check)",
+                );
+                ui.add_enabled_ui(config.validate_carved, |ui| {
+                    ui.indent("validate_opts", |ui| {
+                        ui.checkbox(&mut config.remove_invalid, "Remove invalid files");
+                    });
+                });
+                if !config.validate_carved && config.remove_invalid {
+                    config.remove_invalid = false;
+                }
+
+                ui.checkbox(&mut config.dedupe, "Track duplicates in metadata");
+                ui.add_enabled_ui(config.dedupe, |ui| {
+                    ui.indent("dedupe_opts", |ui| {
+                        ui.checkbox(&mut config.skip_duplicates, "Skip writing duplicate files");
+                    });
+                });
+                if !config.dedupe && config.skip_duplicates {
+                    config.skip_duplicates = false;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Hash algorithms:");
+                    for algo in SUPPORTED_HASH_ALGORITHMS {
+                        let mut on = config
+                            .hash_algorithms
+                            .iter()
+                            .any(|a| a.eq_ignore_ascii_case(algo));
+                        if ui.checkbox(&mut on, *algo).changed() {
+                            config
+                                .hash_algorithms
+                                .retain(|a| !a.eq_ignore_ascii_case(algo));
+                            if on {
+                                config.hash_algorithms.push((*algo).to_string());
+                            }
+                        }
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                // Checkpoint / resume
+                ui.label(RichText::new("Checkpoint / resume").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Checkpoint path:");
+                    let mut has = config.checkpoint_path.is_some();
+                    if ui.checkbox(&mut has, "").changed() {
+                        config.checkpoint_path = if has { Some(String::new()) } else { None };
+                    }
+                    if let Some(ref mut p) = config.checkpoint_path {
+                        ui.add(
+                            egui::TextEdit::singleline(p)
+                                .hint_text("/path/to/run.ckpt")
+                                .desired_width(280.0),
+                        );
+                        if ui.button("Browse...").clicked() {
+                            if let Some(path) = FileDialog::new().save_file() {
+                                *p = path.display().to_string();
+                            }
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Resume from:");
+                    let mut has = config.resume_from.is_some();
+                    if ui.checkbox(&mut has, "").changed() {
+                        config.resume_from = if has { Some(String::new()) } else { None };
+                    }
+                    if let Some(ref mut p) = config.resume_from {
+                        ui.add(
+                            egui::TextEdit::singleline(p)
+                                .hint_text("/path/to/run.ckpt")
+                                .desired_width(280.0),
+                        );
+                        if ui.button("Browse...").clicked() {
+                            if let Some(path) = FileDialog::new().pick_file() {
+                                *p = path.display().to_string();
+                            }
+                        }
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                // Optional YAML config
+                ui.label(RichText::new("YAML config (optional)").strong());
+                ui.horizontal(|ui| {
+                    let mut has = config.config_path.is_some();
+                    if ui.checkbox(&mut has, "Use --config-path").changed() {
+                        config.config_path = if has { Some(String::new()) } else { None };
+                    }
+                    if let Some(ref mut p) = config.config_path {
+                        ui.add(
+                            egui::TextEdit::singleline(p)
+                                .hint_text("/path/to/swiftbeaver.yaml")
+                                .desired_width(260.0),
+                        );
+                        if ui.button("Browse...").clicked() {
+                            if let Some(path) = FileDialog::new()
+                                .add_filter("YAML", &["yaml", "yml"])
+                                .pick_file()
+                            {
+                                *p = path.display().to_string();
+                            }
+                        }
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                // Evidence SHA-256 override
+                ui.label(RichText::new("Evidence SHA-256 (optional)").strong());
+                ui.horizontal(|ui| {
+                    let mut has = config.evidence_sha256.is_some();
+                    if ui.checkbox(&mut has, "Provide hex").changed() {
+                        config.evidence_sha256 = if has { Some(String::new()) } else { None };
+                    }
+                    if let Some(ref mut h) = config.evidence_sha256 {
+                        ui.add(
+                            egui::TextEdit::singleline(h)
+                                .hint_text("sha256 hex")
+                                .desired_width(420.0),
+                        );
+                    }
                 });
             });
 
@@ -408,7 +716,11 @@ impl ConfigPanel {
             let validation = validate_config(config);
             if !validation.is_empty() {
                 ui.group(|ui| {
-                    ui.label(RichText::new("⚠ Configuration Issues").color(Color32::YELLOW).strong());
+                    ui.label(
+                        RichText::new("⚠ Configuration Issues")
+                            .color(Color32::YELLOW)
+                            .strong(),
+                    );
                     for issue in &validation {
                         ui.label(RichText::new(format!("• {}", issue)).color(Color32::YELLOW));
                     }
@@ -421,21 +733,23 @@ impl ConfigPanel {
 /// Validate configuration and return issues
 fn validate_config(config: &ScanConfig) -> Vec<String> {
     let mut issues = Vec::new();
-    
+
     if config.input_path.is_empty() {
         issues.push("Input file path is required".to_string());
     } else if !std::path::Path::new(&config.input_path).exists() {
         issues.push("Input file does not exist".to_string());
     }
-    
+
     if config.output_path.is_empty() {
         issues.push("Output directory is required".to_string());
     }
-    
+
     if config.file_types.is_empty() {
         issues.push("At least one file type must be selected".to_string());
     }
-    
+
+    issues.extend(validate_flag_combinations(config));
+
     issues
 }
 
@@ -451,7 +765,7 @@ mod tests {
             file_types: Vec::new(),
             ..Default::default()
         };
-        
+
         let issues = validate_config(&config);
         assert!(issues.len() >= 3);
     }
@@ -464,7 +778,7 @@ mod tests {
             file_types: vec!["jpeg".to_string()],
             ..Default::default()
         };
-        
+
         let issues = validate_config(&config);
         assert!(issues.is_empty() || issues.len() == 1); // May not exist
     }

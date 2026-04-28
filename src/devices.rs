@@ -10,6 +10,7 @@ pub struct BlockDevice {
     /// Device name (e.g., sda)
     pub name: String,
     /// Size in bytes
+    #[allow(dead_code)]
     pub size: u64,
     /// Human-readable size
     pub size_display: String,
@@ -69,10 +70,16 @@ fn format_size(bytes: u64) -> String {
 /// Detect block device type from name
 fn detect_device_type(name: &str) -> DeviceType {
     if name.starts_with("nvme") {
-        if name.contains("p") && name.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if name.contains("p")
+            && name
+                .chars()
+                .last()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+        {
             // Check if it's nvme0n1p1 pattern (partition)
             if let Some(pos) = name.rfind('p') {
-                if name[pos+1..].chars().all(|c| c.is_ascii_digit()) {
+                if name[pos + 1..].chars().all(|c| c.is_ascii_digit()) {
                     return DeviceType::NVMePartition;
                 }
             }
@@ -82,7 +89,12 @@ fn detect_device_type(name: &str) -> DeviceType {
         DeviceType::Loop
     } else if name.starts_with("sd") || name.starts_with("hd") || name.starts_with("vd") {
         // Check if it ends with a number (partition) or just letters (disk)
-        if name.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if name
+            .chars()
+            .last()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
             DeviceType::Partition
         } else {
             DeviceType::Disk
@@ -93,37 +105,37 @@ fn detect_device_type(name: &str) -> DeviceType {
 }
 
 /// List available block devices on the system
-/// 
+///
 /// This reads from /sys/block on Linux to enumerate devices.
 /// On non-Linux systems, returns an empty list.
 #[cfg(target_os = "linux")]
 pub fn list_block_devices() -> Vec<BlockDevice> {
     let mut devices = Vec::new();
-    
+
     // Read /sys/block for block devices
     let sys_block = PathBuf::from("/sys/block");
     if !sys_block.exists() {
         return devices;
     }
-    
+
     let entries = match std::fs::read_dir(&sys_block) {
         Ok(e) => e,
         Err(_) => return devices,
     };
-    
+
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name().to_string_lossy().to_string();
-        
+
         // Skip ram devices and certain virtual devices
         if name.starts_with("ram") || name.starts_with("zram") {
             continue;
         }
-        
+
         let device_path = PathBuf::from("/dev").join(&name);
         if !device_path.exists() {
             continue;
         }
-        
+
         // Get device size
         let size_path = sys_block.join(&name).join("size");
         let size = std::fs::read_to_string(&size_path)
@@ -131,26 +143,26 @@ pub fn list_block_devices() -> Vec<BlockDevice> {
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map(|sectors| sectors * 512) // Convert sectors to bytes
             .unwrap_or(0);
-        
+
         // Skip devices with 0 size
         if size == 0 {
             continue;
         }
-        
+
         // Get removable status
         let removable_path = sys_block.join(&name).join("removable");
         let removable = std::fs::read_to_string(&removable_path)
             .ok()
             .map(|s| s.trim() == "1")
             .unwrap_or(false);
-        
+
         // Try to get model
         let model_path = sys_block.join(&name).join("device/model");
         let model = std::fs::read_to_string(&model_path)
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        
+
         // If no model, try vendor
         let model = model.or_else(|| {
             let vendor_path = sys_block.join(&name).join("device/vendor");
@@ -159,9 +171,9 @@ pub fn list_block_devices() -> Vec<BlockDevice> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         });
-        
+
         let device_type = detect_device_type(&name);
-        
+
         devices.push(BlockDevice {
             path: device_path,
             name,
@@ -172,10 +184,10 @@ pub fn list_block_devices() -> Vec<BlockDevice> {
             device_type,
         });
     }
-    
+
     // Sort by name
     devices.sort_by(|a, b| a.name.cmp(&b.name));
-    
+
     devices
 }
 
@@ -188,14 +200,21 @@ pub fn list_block_devices() -> Vec<BlockDevice> {
 }
 
 /// Filter devices to show only whole disks (not partitions)
+#[allow(dead_code)]
 pub fn list_disks_only() -> Vec<BlockDevice> {
     list_block_devices()
         .into_iter()
-        .filter(|d| matches!(d.device_type, DeviceType::Disk | DeviceType::NVMe | DeviceType::Loop))
+        .filter(|d| {
+            matches!(
+                d.device_type,
+                DeviceType::Disk | DeviceType::NVMe | DeviceType::Loop
+            )
+        })
         .collect()
 }
 
 /// Check if a path looks like a block device
+#[allow(dead_code)]
 pub fn is_block_device_path(path: &str) -> bool {
     path.starts_with("/dev/")
 }
@@ -230,7 +249,7 @@ mod tests {
         assert!(!is_block_device_path("/home/user/image.dd"));
         assert!(!is_block_device_path("image.dd"));
     }
-    
+
     #[test]
     fn test_list_block_devices() {
         // Just ensure it doesn't panic

@@ -4,5 +4,5 @@
 
 pub mod config;
 pub mod devices;
-pub mod scan;
 pub mod metadata;
+pub mod scan;
