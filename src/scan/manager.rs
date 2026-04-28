@@ -284,14 +284,12 @@ fn run_scan_thread(args: Vec<String>, message_tx: Sender<ScanMessage>, cancel_rx
     // Clone for stderr thread
     let message_tx_stderr = message_tx.clone();
 
-    // Spawn stderr reader thread
+    // Spawn stderr reader thread. SwiftBeaver normally writes JSON logs to
+    // stdout, but parsing structured events from stderr too keeps Lodge robust
+    // against future stream-routing changes and external redirection.
     let stderr_handle = std::thread::spawn(move || {
         for line in stderr_reader.lines().map_while(Result::ok) {
-            let _ = message_tx_stderr.send(ScanMessage::Log(LogEntry {
-                timestamp: Utc::now().to_rfc3339(),
-                level: "STDERR".to_string(),
-                message: line,
-            }));
+            dispatch_log_line(&line, &message_tx_stderr, "STDERR");
         }
     });
 
@@ -313,57 +311,7 @@ fn run_scan_thread(args: Vec<String>, message_tx: Sender<ScanMessage>, cancel_rx
             break;
         }
 
-        // Parse JSON log line
-        if let Some((event_type, payload)) = parse_json_log(&line) {
-            if event_type == "progress" {
-                if let Ok(prog) = serde_json::from_value::<ScanProgress>(payload) {
-                    let _ = message_tx.send(ScanMessage::Progress(prog));
-                }
-            } else if event_type == "starting" {
-                // Extract run_id and output path from starting message
-                let run_id = payload
-                    .get("run_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let output_path = payload
-                    .get("output")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                if !output_path.is_empty() {
-                    let _ = message_tx.send(ScanMessage::RunOutputPath {
-                        run_id: run_id.clone(),
-                        output_path: output_path.clone(),
-                    });
-                    let _ = message_tx.send(ScanMessage::Log(LogEntry {
-                        timestamp: Utc::now().to_rfc3339(),
-                        level: "INFO".to_string(),
-                        message: format!("Run ID: {} → Output: {}", run_id, output_path),
-                    }));
-                }
-            } else {
-                // It's a log entry
-                let msg = payload
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&line);
-
-                let _ = message_tx.send(ScanMessage::Log(LogEntry {
-                    timestamp: Utc::now().to_rfc3339(),
-                    level: event_type.to_uppercase(),
-                    message: msg.to_string(),
-                }));
-            }
-        } else {
-            // Plain text line
-            let _ = message_tx.send(ScanMessage::Log(LogEntry {
-                timestamp: Utc::now().to_rfc3339(),
-                level: "INFO".to_string(),
-                message: line,
-            }));
-        }
+        dispatch_log_line(&line, &message_tx, "INFO");
     }
 
     // Wait for stderr thread
@@ -410,6 +358,67 @@ fn run_scan_thread(args: Vec<String>, message_tx: Sender<ScanMessage>, cancel_rx
     };
 
     let _ = message_tx.send(ScanMessage::StateChange(final_state));
+}
+
+/// Parse a single log line from SwiftBeaver and forward it as one or more
+/// [`ScanMessage`]s. Used for both stdout and stderr; `default_level` is the
+/// fallback log level for plain-text lines that do not parse as JSON.
+fn dispatch_log_line(line: &str, message_tx: &Sender<ScanMessage>, default_level: &str) {
+    let Some((event_type, payload)) = parse_json_log(line) else {
+        // Plain text or malformed JSON. Surface it as a log entry so users
+        // still see what SwiftBeaver wrote, without crashing the manager.
+        if !line.is_empty() {
+            let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                timestamp: Utc::now().to_rfc3339(),
+                level: default_level.to_string(),
+                message: line.to_string(),
+            }));
+        }
+        return;
+    };
+
+    match event_type.as_str() {
+        "progress" => {
+            if let Ok(prog) = serde_json::from_value::<ScanProgress>(payload) {
+                let _ = message_tx.send(ScanMessage::Progress(prog));
+            }
+        }
+        "starting" => {
+            let run_id = payload
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let output_path = payload
+                .get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if !output_path.is_empty() {
+                let _ = message_tx.send(ScanMessage::RunOutputPath {
+                    run_id: run_id.clone(),
+                    output_path: output_path.clone(),
+                });
+                let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                    timestamp: Utc::now().to_rfc3339(),
+                    level: "INFO".to_string(),
+                    message: format!("Run ID: {} → Output: {}", run_id, output_path),
+                }));
+            }
+        }
+        _ => {
+            let msg = payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or(line);
+            let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                timestamp: Utc::now().to_rfc3339(),
+                level: event_type.to_uppercase(),
+                message: msg.to_string(),
+            }));
+        }
+    }
 }
 
 /// Generate a unique run ID
@@ -905,5 +914,75 @@ mod tests {
             "unexpected error: {msg}"
         );
         assert_eq!(manager.state(), ScanState::Idle);
+    }
+
+    #[test]
+    fn test_dispatch_log_line_v051_progress() {
+        let (tx, rx) = channel::<ScanMessage>();
+        let line = r#"{"timestamp":"2026-04-28T14:02:03.188362Z","level":"INFO","fields":{"message":"progress 50.0% scanned=1048576/2097152 hits=12 files=0 rate=42.5MiB/s eta=5s errs=[carve:0 meta:0 sql:0]"},"target":"swiftbeaver"}"#;
+        dispatch_log_line(line, &tx, "INFO");
+        match rx.try_recv().expect("expected a progress message") {
+            ScanMessage::Progress(p) => {
+                assert_eq!(p.bytes_scanned, 1_048_576);
+                assert_eq!(p.total_bytes, 2_097_152);
+                assert_eq!(p.eta_secs, Some(5));
+            }
+            other => panic!("expected Progress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_dispatch_log_line_starting_emits_run_output_path() {
+        let (tx, rx) = channel::<ScanMessage>();
+        let line = r#"{"timestamp":"2026-04-28T14:02:03.166515Z","level":"INFO","fields":{"message":"starting run_id=20260428T140203Z_09e96cdf input=test.dd output=out/20260428T140203Z_09e96cdf scan_workers=16 carve_workers=16 chunk_mib=64"},"target":"swiftbeaver"}"#;
+        dispatch_log_line(line, &tx, "INFO");
+        let first = rx.try_recv().expect("expected RunOutputPath message");
+        match first {
+            ScanMessage::RunOutputPath {
+                run_id,
+                output_path,
+            } => {
+                assert_eq!(run_id, "20260428T140203Z_09e96cdf");
+                assert_eq!(output_path, "out/20260428T140203Z_09e96cdf");
+            }
+            other => panic!("expected RunOutputPath, got {other:?}"),
+        }
+        // A follow-up Log entry is also emitted.
+        assert!(matches!(rx.try_recv(), Ok(ScanMessage::Log(_))));
+    }
+
+    #[test]
+    fn test_dispatch_log_line_plain_text_uses_default_level() {
+        let (tx, rx) = channel::<ScanMessage>();
+        dispatch_log_line("not json at all", &tx, "STDERR");
+        match rx.try_recv().expect("expected log message") {
+            ScanMessage::Log(entry) => {
+                assert_eq!(entry.level, "STDERR");
+                assert_eq!(entry.message, "not json at all");
+            }
+            other => panic!("expected Log, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_dispatch_log_line_empty_line_is_ignored() {
+        let (tx, rx) = channel::<ScanMessage>();
+        dispatch_log_line("", &tx, "STDERR");
+        assert!(rx.try_recv().is_err(), "empty line must not emit a message");
+    }
+
+    #[test]
+    fn test_dispatch_log_line_does_not_panic_on_garbage_json() {
+        let (tx, rx) = channel::<ScanMessage>();
+        // Valid JSON but missing the fields parse_json_log requires.
+        dispatch_log_line(r#"{"foo":"bar"}"#, &tx, "INFO");
+        // Should be surfaced as a plain log line at the default level.
+        match rx.try_recv().expect("expected log message") {
+            ScanMessage::Log(entry) => {
+                assert_eq!(entry.level, "INFO");
+                assert!(entry.message.contains("foo"));
+            }
+            other => panic!("expected Log, got {other:?}"),
+        }
     }
 }
