@@ -158,6 +158,35 @@ SwiftBeaverLodge/
 | GPU Acceleration | Use GPU for faster scanning (`--gpu`) | disabled |
 | Evidence Hash | Compute SHA-256 of evidence | enabled |
 
+### Supported file type categories
+
+The GUI exposes every carver shipped with SwiftBeaver v0.5.1, organised into
+the following categories (selectable individually or via the preset buttons
+**Select All / None / Images / Documents / Media / Windows Artefacts**):
+
+| Category | Types |
+|----------|-------|
+| Images | `jpeg`, `png`, `gif`, `webp`, `bmp`, `tiff`, `heic`, `ico` |
+| Documents | `pdf`, `doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`, `odt`, `ods`, `odp`, `rtf`, `eml` |
+| eBooks | `epub`, `mobi`, `fb2`, `lrf` |
+| Archives | `zip`, `rar`, `7z`, `tar`, `gzip`, `bzip2`, `xz` |
+| Databases | `sqlite`, `sqlite_wal`, `sqlite_page` |
+| Media | `mp4`, `mov`, `avi`, `webm`, `wmv`, `mp3`, `wav`, `ogg` |
+| Windows Artefacts | `lnk`, `prefetch`, `registry`, `evtx` |
+| Executables | `elf` |
+
+**ZIP-derived classifications.** `docx`, `xlsx`, and `pptx` are ZIP-based
+office formats; together with raw `zip`, they are skipped when SwiftBeaver
+runs with **Disable ZIP carving** (`--disable-zip`). These entries are
+marked with `*` in the file-type list and surface a tooltip in the GUI.
+Other ZIP-structured formats such as `epub` and the OpenDocument types
+(`odt`, `ods`, `odp`) have their own dedicated carvers in v0.5.1 and are
+not affected by `--disable-zip`.
+
+> Carver names match SwiftBeaver's `--types` / `--enable-types` identifiers
+> exactly. Notably, gzip and bzip2 use their long names (`gzip`, `bzip2`),
+> not the file extensions `gz` / `bz2`.
+
 ## Tests
 
 ```bash

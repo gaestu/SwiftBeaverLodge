@@ -5,8 +5,17 @@ use rfd::FileDialog;
 
 use crate::config::{
     validate_flag_combinations, MetadataBackend, ScanConfig, FILE_TYPES, SUPPORTED_HASH_ALGORITHMS,
+    ZIP_DERIVED_TYPES,
 };
 use crate::devices::{list_block_devices, BlockDevice, DeviceType};
+
+/// Replace `config.file_types` with the catalog entries for `category`.
+/// No-op if the category is not present in `FILE_TYPES`.
+fn set_preset(config: &mut ScanConfig, category: &str) {
+    if let Some((_, _, types)) = FILE_TYPES.iter().find(|(c, _, _)| *c == category) {
+        config.file_types = types.iter().map(|t| (*t).to_string()).collect();
+    }
+}
 
 /// Input source type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,7 +243,7 @@ impl ConfigPanel {
                 ui.label(RichText::new("File Types to Carve").strong());
                 ui.add_space(5.0);
 
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Select All").clicked() {
                         config.file_types.clear();
                         for (_category, _icon, types) in FILE_TYPES {
@@ -246,14 +255,17 @@ impl ConfigPanel {
                     if ui.button("Select None").clicked() {
                         config.file_types.clear();
                     }
-                    if ui.button("Images Only").clicked() {
-                        config.file_types = vec![
-                            "jpeg".to_string(),
-                            "png".to_string(),
-                            "gif".to_string(),
-                            "bmp".to_string(),
-                            "webp".to_string(),
-                        ];
+                    if ui.button("Images").clicked() {
+                        set_preset(config, "Images");
+                    }
+                    if ui.button("Documents").clicked() {
+                        set_preset(config, "Documents");
+                    }
+                    if ui.button("Media").clicked() {
+                        set_preset(config, "Media");
+                    }
+                    if ui.button("Windows Artefacts").clicked() {
+                        set_preset(config, "Windows Artefacts");
                     }
                 });
 
@@ -261,11 +273,23 @@ impl ConfigPanel {
 
                 // Show file types by category
                 for (category, icon, types) in FILE_TYPES {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(format!("{} {}", icon, category));
                         for file_type in *types {
                             let mut selected = config.file_types.contains(&file_type.to_string());
-                            if ui.checkbox(&mut selected, *file_type).changed() {
+                            let zip_derived = ZIP_DERIVED_TYPES.contains(file_type);
+                            let label = if zip_derived {
+                                format!("{file_type} *")
+                            } else {
+                                (*file_type).to_string()
+                            };
+                            let mut response = ui.checkbox(&mut selected, label);
+                            if zip_derived {
+                                response = response.on_hover_text(
+                                    "ZIP-derived format: skipped when --disable-zip is set",
+                                );
+                            }
+                            if response.changed() {
                                 if selected {
                                     if !config.file_types.contains(&file_type.to_string()) {
                                         config.file_types.push(file_type.to_string());
@@ -277,6 +301,15 @@ impl ConfigPanel {
                         }
                     });
                 }
+
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(
+                        "* ZIP-derived formats are skipped when \"Disable ZIP carving\" is on.",
+                    )
+                    .small()
+                    .color(Color32::GRAY),
+                );
             });
 
             ui.add_space(10.0);

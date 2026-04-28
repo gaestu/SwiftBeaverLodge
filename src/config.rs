@@ -117,6 +117,9 @@ impl Default for ScanConfig {
                 "jpeg".into(),
                 "png".into(),
                 "gif".into(),
+                "webp".into(),
+                "bmp".into(),
+                "tiff".into(),
                 "pdf".into(),
                 "zip".into(),
                 "sqlite".into(),
@@ -124,7 +127,6 @@ impl Default for ScanConfig {
                 "xlsx".into(),
                 "pptx".into(),
                 "mp4".into(),
-                "webp".into(),
             ],
             disable_zip: false,
             scan_strings: true,
@@ -181,18 +183,54 @@ impl MetadataBackend {
     }
 }
 
-/// Available file types for carving
+/// Available file types for carving, grouped by category for the UI.
+///
+/// Each tuple is `(category_name, icon, &[file_type])`. The file type strings
+/// are the exact identifiers accepted by SwiftBeaver v0.5.1's
+/// `--types` / `--enable-types` flags. Adding a value here that SwiftBeaver
+/// does not recognise will cause `unknown file type in --types` warnings at
+/// runtime, so this catalog is kept aligned with the bundled binary.
 pub const FILE_TYPES: &[(&str, &str, &[&str])] = &[
     (
         "Images",
         "🖼",
-        &["jpeg", "png", "gif", "webp", "bmp", "tiff"],
+        &["jpeg", "png", "gif", "webp", "bmp", "tiff", "heic", "ico"],
     ),
-    ("Documents", "📄", &["pdf", "docx", "xlsx", "pptx"]),
-    ("Archives", "📦", &["zip", "rar", "7z"]),
-    ("Databases", "🗃", &["sqlite"]),
-    ("Media", "🎬", &["mp4", "mp3", "wav"]),
+    (
+        "Documents",
+        "📄",
+        &[
+            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "eml",
+        ],
+    ),
+    ("eBooks", "📚", &["epub", "mobi", "fb2", "lrf"]),
+    (
+        "Archives",
+        "📦",
+        &["zip", "rar", "7z", "tar", "gzip", "bzip2", "xz"],
+    ),
+    ("Databases", "🗃", &["sqlite", "sqlite_wal", "sqlite_page"]),
+    (
+        "Media",
+        "🎬",
+        &["mp4", "mov", "avi", "webm", "wmv", "mp3", "wav", "ogg"],
+    ),
+    (
+        "Windows Artefacts",
+        "🪟",
+        &["lnk", "prefetch", "registry", "evtx"],
+    ),
+    ("Executables", "⚙", &["elf"]),
 ];
+
+/// File types whose carving relies on the ZIP carver and are therefore
+/// skipped when SwiftBeaver is invoked with `--disable-zip`.
+///
+/// SwiftBeaver v0.5.1 documents this as "skips zip/docx/xlsx/pptx" in its
+/// `--disable-zip` help text. Other ZIP-structured formats (epub, odt, ods,
+/// odp) are not enumerated by upstream as `--disable-zip`-affected, so they
+/// are intentionally not included here.
+pub const ZIP_DERIVED_TYPES: &[&str] = &["zip", "docx", "xlsx", "pptx"];
 
 /// Hash algorithms recognised by SwiftBeaver's `--hash-algorithms` flag.
 pub const SUPPORTED_HASH_ALGORITHMS: &[&str] = &["md5", "sha256"];
@@ -285,5 +323,124 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: ScanConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.scan_strings, config.scan_strings);
+    }
+
+    /// Flatten the categorised catalog into a single list of file-type ids.
+    fn all_catalog_types() -> Vec<&'static str> {
+        FILE_TYPES
+            .iter()
+            .flat_map(|(_, _, types)| types.iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn file_types_catalog_entries_are_unique_and_non_empty() {
+        let mut seen = std::collections::HashSet::new();
+        for (category, _icon, types) in FILE_TYPES {
+            assert!(!category.is_empty(), "category name must not be empty");
+            assert!(
+                !types.is_empty(),
+                "category {category} must list at least one type"
+            );
+            for t in *types {
+                assert!(!t.is_empty(), "file type id must not be empty");
+                assert!(
+                    seen.insert(*t),
+                    "file type {t} appears in more than one category"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_file_types_are_in_catalog() {
+        let catalog = all_catalog_types();
+        for t in &ScanConfig::default().file_types {
+            assert!(
+                catalog.contains(&t.as_str()),
+                "default file type {t} missing from FILE_TYPES catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn zip_derived_types_are_in_catalog() {
+        let catalog = all_catalog_types();
+        for t in ZIP_DERIVED_TYPES {
+            assert!(
+                catalog.contains(t),
+                "ZIP-derived type {t} must be present in FILE_TYPES catalog"
+            );
+        }
+    }
+
+    /// Regression test for issue #3: ensure the catalog covers all
+    /// SwiftBeaver v0.5.1 carvers the issue requires us to expose.
+    #[test]
+    fn file_types_catalog_covers_v0_5_1_carvers() {
+        let catalog = all_catalog_types();
+        let required = [
+            // Images
+            "jpeg",
+            "png",
+            "gif",
+            "webp",
+            "bmp",
+            "tiff",
+            "heic",
+            "ico",
+            // Documents
+            "pdf",
+            "doc",
+            "docx",
+            "xls",
+            "xlsx",
+            "ppt",
+            "pptx",
+            "odt",
+            "ods",
+            "odp",
+            "rtf",
+            "eml",
+            // eBooks
+            "epub",
+            "mobi",
+            "fb2",
+            "lrf",
+            // Archives (note: SwiftBeaver uses gzip/bzip2, not gz/bz2)
+            "zip",
+            "rar",
+            "7z",
+            "tar",
+            "gzip",
+            "bzip2",
+            "xz",
+            // Databases
+            "sqlite",
+            "sqlite_wal",
+            "sqlite_page",
+            // Media
+            "mp4",
+            "mov",
+            "avi",
+            "webm",
+            "wmv",
+            "mp3",
+            "wav",
+            "ogg",
+            // Windows artefacts
+            "lnk",
+            "prefetch",
+            "registry",
+            "evtx",
+            // Executables
+            "elf",
+        ];
+        for t in required {
+            assert!(
+                catalog.contains(&t),
+                "FILE_TYPES catalog missing required v0.5.1 carver {t}"
+            );
+        }
     }
 }
