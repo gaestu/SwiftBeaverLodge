@@ -10,11 +10,11 @@ A pure Rust desktop application for forensic file recovery using [egui](https://
 ## Features
 
 - 📂 **Multi-format evidence support** - Raw images (.dd, .raw, .img), E01 format, and block devices
-- � **Raw device scanning** - Direct access to /dev/sdX, /dev/nvmeXnY devices with dropdown selection
+- **Raw device scanning** - Direct access to /dev/sdX, /dev/nvmeXnY devices with dropdown selection
 - 🔍 **Comprehensive file recovery** - Images, documents, archives, databases, media, and more
 - 🔗 **String/URL/Email extraction** - Find text patterns in evidence
 - 📊 **Real-time progress monitoring** - Live throughput, ETA, and statistics
-- 📁 **Result browsing** - Filter and search carved files
+- 📁 **Result browsing** - Filter and search carved files from SwiftBeaver v0.5.1 Parquet metadata, with JSONL/CSV support, including hashes, validation, truncation, duplicate, and error fields
 - 💾 **Offline/Airgapped operation** - No network required for forensic integrity
 - 🚀 **GPU acceleration** - Optional OpenCL/CUDA support via the `--gpu` flag
 - 🎯 **Single binary** - No npm, no web stack, just `cargo build`

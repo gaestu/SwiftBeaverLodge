@@ -4,7 +4,14 @@
 
 **Version:** 1.0.0-draft  
 **Date:** January 2, 2026  
-**Status:** Planning Phase
+**Status:** Historical planning document
+
+> Historical note: this document predates the current SwiftBeaverLodge
+> architecture. The implemented app is a Rust egui desktop frontend that invokes
+> the unified `swiftbeaver` v0.5.1+ CLI through `std::process::Command`; it does
+> not embed SwiftBeaver as a library crate and does not use Tauri/Svelte. Use
+> `AGENTS.md`, `README.md`, and the current `src/` tree as the source of truth
+> for active implementation work.
 
 ---
 
@@ -27,7 +34,7 @@ SwiftBeaverLodge is a desktop GUI application that provides a user-friendly inte
 | Network | Fully offline/airgapped capable |
 | Concurrency | Single scan at a time |
 | User Model | Single user, no authentication |
-| Integration | SwiftBeaver bundled as library crate |
+| Integration | Historical plan: SwiftBeaver bundled as library crate. Current app: external `swiftbeaver` v0.5.1+ subprocess. |
 
 ---
 
@@ -139,7 +146,7 @@ This approach:
 |---------|-------------|----------|
 | File Tree | Browse carved files by type | P0 |
 | Thumbnail Grid | Visual grid for images | P0 |
-| Metadata Table | Sortable/filterable carved_files.jsonl | P0 |
+| Metadata Table | Sortable/filterable v0.5.1 results from Parquet `parquet/files_*.parquet` and JSONL `metadata/carved_files.jsonl`, including hashes, validation, truncation, duplicate, and error fields | P0 |
 | File Preview | In-app preview for images, PDFs, text | P1 |
 | Hex Viewer | Raw bytes viewer for any file | P1 |
 | String Artefacts | Browse URLs, emails, phones | P0 |
@@ -183,7 +190,7 @@ This approach:
 │  └─────────────────────────────────────────────────────────────────┘ │
 │                                                                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│  SwiftBeaver v0.2.1 | SwiftBeaverLodge v1.0.0 | Ready               │
+│  SwiftBeaver v0.5.1+ | SwiftBeaverLodge v1.0.0 | Ready              │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -372,7 +379,7 @@ SwiftBeaverLodge/
 │   │   │
 │   │   ├── results/
 │   │   │   ├── mod.rs
-│   │   │   ├── parser.rs          # JSONL/CSV parser
+│   │   │   ├── parser.rs          # Historical JSONL/CSV parser plan; current app reads Parquet/JSONL/CSV in src/metadata/reader.rs
 │   │   │   ├── thumbnails.rs      # Thumbnail generation
 │   │   │   └── preview.rs         # File preview generation
 │   │   │
@@ -615,12 +622,21 @@ interface GpuInfo {
 
 interface CarvedFile {
   id: string;
+    run_id?: string;
   file_type: string;
   path: string;
-  offset: number;
+    extension?: string;
+    global_start: number;
+    global_end: number;
   size: number;
-  sha256: string;
-  carved_at: string;
+    md5?: string;
+    sha256?: string;
+    validated: boolean;
+    truncated: boolean;
+    errors: string[];
+    pattern_id?: string;
+    is_duplicate: boolean;
+    duplicate_of_offset?: number;
 }
 ```
 
@@ -805,7 +821,7 @@ pub struct ScanProgress {
 - [ ] Test with various image formats
 
 ### Phase 3: Results Browser (Week 5-6)
-- [ ] Implement JSONL/CSV parser
+- [ ] Historical plan: implement JSONL/CSV parser. Current app reads Parquet `files_*.parquet`, JSONL `carved_files.jsonl`, and CSV via `src/metadata/reader.rs`.
 - [ ] Build file tree component
 - [ ] Create thumbnail generation
 - [ ] Build metadata table with sorting/filtering

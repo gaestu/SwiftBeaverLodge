@@ -57,12 +57,22 @@ fn test_jsonl_metadata_roundtrip() {
 
     let file = CarvedFile {
         id: 1,
+        run_id: Some("run-1".to_string()),
         file_type: "jpeg".to_string(),
-        offset: 1024,
+        path: "carved/0001.jpg".to_string(),
+        extension: Some("jpg".to_string()),
+        global_start: 1024,
+        global_end: 5120,
         size: 4096,
-        output_path: "carved/0001.jpg".to_string(),
+        handler_id: Some("jpeg".to_string()),
+        md5: Some("def456".to_string()),
         sha256: Some("abc123".to_string()),
-        is_valid: true,
+        validated: true,
+        truncated: false,
+        errors: Vec::new(),
+        pattern_id: Some("jpeg_soi".to_string()),
+        is_duplicate: false,
+        duplicate_of_offset: None,
         mime_type: Some("image/jpeg".to_string()),
         width: Some(800),
         height: Some(600),
@@ -76,9 +86,15 @@ fn test_jsonl_metadata_roundtrip() {
 
     assert_eq!(parsed.id, file.id);
     assert_eq!(parsed.file_type, file.file_type);
-    assert_eq!(parsed.offset, file.offset);
+    assert_eq!(parsed.global_start, file.global_start);
+    assert_eq!(parsed.global_end, file.global_end);
+    assert_eq!(parsed.path, file.path);
+    assert_eq!(parsed.md5, file.md5);
     assert_eq!(parsed.size, file.size);
     assert_eq!(parsed.sha256, file.sha256);
+    assert_eq!(parsed.validated, file.validated);
+    assert_eq!(parsed.truncated, file.truncated);
+    assert_eq!(parsed.is_duplicate, file.is_duplicate);
     assert_eq!(parsed.width, file.width);
     assert_eq!(parsed.height, file.height);
 }
@@ -132,16 +148,16 @@ fn test_progress_parsing() {
 /// Test metadata reader with mock JSONL data
 #[test]
 fn test_metadata_reader_mock() {
-    use swiftbeaverlodge::metadata::MetadataReader;
+    use swiftbeaverlodge::metadata::{MetadataReader, MetadataSummary};
 
     let temp = TempDir::new().unwrap();
     let metadata_dir = temp.path().join("metadata");
     std::fs::create_dir(&metadata_dir).unwrap();
 
     // Create mock carved_files.jsonl
-    let jsonl_data = r#"{"id":1,"file_type":"jpeg","offset":1024,"size":4096,"output_path":"carved/0001.jpg","is_valid":true}
-{"id":2,"file_type":"png","offset":5120,"size":2048,"output_path":"carved/0002.png","is_valid":true}
-{"id":3,"file_type":"jpeg","offset":7168,"size":8192,"output_path":"carved/0003.jpg","is_valid":true}"#;
+    let jsonl_data = r#"{"run_id":"run-1","file_type":"jpeg","path":"jpeg/jpeg_000000000400.jpg","extension":"jpg","global_start":1024,"global_end":5120,"size":4096,"sha256":"sha-a","validated":true,"truncated":false,"errors":[],"pattern_id":"jpeg_soi","is_duplicate":false,"duplicate_of_offset":null}
+{"run_id":"run-1","file_type":"png","path":"png/png_000000001400.png","extension":"png","global_start":5120,"global_end":7168,"size":2048,"sha256":"sha-b","validated":true,"truncated":false,"errors":[],"pattern_id":"png_sig","is_duplicate":false,"duplicate_of_offset":null}
+{"run_id":"run-1","file_type":"jpeg","path":"jpeg/jpeg_000000001C00.jpg","extension":"jpg","global_start":7168,"global_end":15360,"size":8192,"sha256":"sha-c","validated":true,"truncated":false,"errors":[],"pattern_id":"jpeg_soi","is_duplicate":false,"duplicate_of_offset":null}"#;
 
     std::fs::write(metadata_dir.join("carved_files.jsonl"), jsonl_data).unwrap();
 
@@ -152,7 +168,8 @@ fn test_metadata_reader_mock() {
     assert_eq!(files.len(), 3);
 
     // Check summary
-    let summary = reader.get_summary().unwrap();
+    let strings = reader.read_string_artefacts().unwrap();
+    let summary = MetadataSummary::from_results(&files, &strings).unwrap();
     assert_eq!(summary.total_files, 3);
     assert_eq!(summary.total_bytes, 4096 + 2048 + 8192);
     assert_eq!(summary.by_type.get("jpeg"), Some(&2));

@@ -61,36 +61,42 @@ impl ResultsPanel {
 
     /// Load results from a run directory
     pub fn load(&mut self, run_path: &str) {
+        self.clear_loaded_state();
         self.run_path = Some(run_path.to_string());
-        self.error = None;
 
         match MetadataReader::new(run_path) {
             Ok(reader) => {
-                // Load summary
-                match reader.get_summary() {
-                    Ok(summary) => self.summary = Some(summary),
-                    Err(e) => self.error = Some(format!("Failed to load summary: {}", e)),
-                }
-
-                // Load files
-                match reader.read_carved_files() {
-                    Ok(files) => self.files = files,
-                    Err(e) => self.error = Some(format!("Failed to load files: {}", e)),
-                }
-
-                // Load strings
-                match reader.read_string_artefacts() {
-                    Ok(strings) => self.strings = strings,
+                let files = match reader.read_carved_files() {
+                    Ok(files) => files,
                     Err(e) => {
-                        // Not an error if no strings
-                        tracing::debug!("No string artefacts: {}", e);
+                        self.error = Some(format_load_error("Failed to load files", &e));
+                        return;
                     }
-                }
+                };
 
+                let strings = match reader.read_string_artefacts() {
+                    Ok(strings) => strings,
+                    Err(e) => {
+                        self.error = Some(format_load_error("Failed to load string artefacts", &e));
+                        Vec::new()
+                    }
+                };
+
+                let summary = match MetadataSummary::from_results(&files, &strings) {
+                    Ok(summary) => summary,
+                    Err(e) => {
+                        self.error = Some(format_load_error("Failed to summarize results", &e));
+                        return;
+                    }
+                };
+
+                self.summary = Some(summary);
+                self.files = files;
+                self.strings = strings;
                 self.reader = Some(reader);
             }
             Err(e) => {
-                self.error = Some(format!("Failed to open results: {}", e));
+                self.error = Some(format_load_error("Failed to open results", &e));
             }
         }
     }
@@ -99,10 +105,17 @@ impl ResultsPanel {
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.run_path = None;
+        self.clear_loaded_state();
+    }
+
+    fn clear_loaded_state(&mut self) {
         self.reader = None;
         self.summary = None;
         self.files.clear();
         self.strings.clear();
+        self.type_filter = None;
+        self.search_query.clear();
+        self.selected_file = None;
         self.error = None;
     }
 
@@ -263,7 +276,7 @@ impl ResultsPanel {
                 }
                 if !self.search_query.is_empty()
                     && !f
-                        .output_path
+                        .path
                         .to_lowercase()
                         .contains(&self.search_query.to_lowercase())
                 {
@@ -307,9 +320,9 @@ impl ResultsPanel {
                                 self.selected_file = Some(*idx);
                             }
                             ui.label(&file.file_type);
-                            ui.label(format!("0x{:X}", file.offset));
+                            ui.label(format!("0x{:X}", file.global_start));
                             ui.label(format_bytes(file.size));
-                            ui.label(&file.output_path);
+                            ui.label(&file.path);
                             ui.end_row();
                         }
 
@@ -343,7 +356,11 @@ impl ResultsPanel {
                             ui.end_row();
 
                             ui.label("Offset:");
-                            ui.label(format!("0x{:X} ({})", file.offset, file.offset));
+                            ui.label(format!("0x{:X} ({})", file.global_start, file.global_start));
+                            ui.end_row();
+
+                            ui.label("End:");
+                            ui.label(format!("0x{:X} ({})", file.global_end, file.global_end));
                             ui.end_row();
 
                             ui.label("Size:");
@@ -351,8 +368,14 @@ impl ResultsPanel {
                             ui.end_row();
 
                             ui.label("Path:");
-                            ui.label(&file.output_path);
+                            ui.label(&file.path);
                             ui.end_row();
+
+                            if let Some(md5) = &file.md5 {
+                                ui.label("MD5:");
+                                ui.label(md5);
+                                ui.end_row();
+                            }
 
                             if let Some(sha256) = &file.sha256 {
                                 ui.label("SHA-256:");
@@ -367,8 +390,52 @@ impl ResultsPanel {
                             }
 
                             ui.label("Valid:");
-                            ui.label(if file.is_valid { "Yes" } else { "No" });
+                            ui.label(if file.validated { "Yes" } else { "No" });
                             ui.end_row();
+
+                            ui.label("Truncated:");
+                            ui.label(if file.truncated { "Yes" } else { "No" });
+                            ui.end_row();
+
+                            if let Some(pattern_id) = &file.pattern_id {
+                                ui.label("Pattern:");
+                                ui.label(pattern_id);
+                                ui.end_row();
+                            }
+
+                            if file.is_duplicate {
+                                ui.label("Duplicate:");
+                                let duplicate = file
+                                    .duplicate_of_offset
+                                    .map(|offset| format!("Yes, original at 0x{offset:X}"))
+                                    .unwrap_or_else(|| "Yes".to_string());
+                                ui.label(duplicate);
+                                ui.end_row();
+                            }
+
+                            if !file.errors.is_empty() {
+                                ui.label("Errors:");
+                                ui.label(format_error_list(&file.errors));
+                                ui.end_row();
+                            }
+
+                            if let Some(run_id) = &file.run_id {
+                                ui.label("Run ID:");
+                                ui.label(run_id);
+                                ui.end_row();
+                            }
+
+                            if let Some(handler_id) = &file.handler_id {
+                                ui.label("Handler:");
+                                ui.label(handler_id);
+                                ui.end_row();
+                            }
+
+                            if let Some(extension) = &file.extension {
+                                ui.label("Extension:");
+                                ui.label(extension);
+                                ui.end_row();
+                            }
                         });
                 });
             }
@@ -431,13 +498,7 @@ impl ResultsPanel {
                             ui.label(format!("0x{:X}", artefact.offset));
                             ui.label(format!("{}", artefact.length));
 
-                            // Truncate long values
-                            let display_value = if artefact.value.len() > 80 {
-                                format!("{}...", &artefact.value[..80])
-                            } else {
-                                artefact.value.clone()
-                            };
-                            ui.label(display_value);
+                            ui.label(truncate_chars(&artefact.value, 80));
                             ui.end_row();
                         }
 
@@ -449,6 +510,49 @@ impl ResultsPanel {
                     });
             });
     }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        truncated.push_str("...");
+    }
+    truncated
+}
+
+fn format_error_list(errors: &[String]) -> String {
+    truncate_chars(&redact_path_like_values(&errors.join("; ")), 240)
+}
+
+fn format_load_error(context: &str, error: &anyhow::Error) -> String {
+    tracing::error!(error = ?error, error_chain = %format!("{:#}", error), "{context}");
+    format!("{}. See application logs for details.", context)
+}
+
+fn redact_path_like_values(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|token| {
+            let trimmed = token.trim_matches(|c: char| matches!(c, ',' | ';' | ')' | '('));
+            if is_path_like_token(trimmed) {
+                token.replace(trimmed, "[path]")
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_path_like_token(token: &str) -> bool {
+    token.starts_with('/')
+        || token.starts_with('\\')
+        || token.contains(":\\")
+        || token.contains(":/")
+        || token.contains('\\')
+        || token.contains('/')
+        || std::path::Path::new(token).is_absolute()
 }
 
 #[cfg(test)]
@@ -468,12 +572,22 @@ mod tests {
         let mut panel = ResultsPanel::new();
         panel.files.push(CarvedFile {
             id: 1,
+            run_id: None,
             file_type: "jpeg".to_string(),
-            offset: 0,
+            path: "test.jpg".to_string(),
+            extension: Some("jpg".to_string()),
+            global_start: 0,
+            global_end: 100,
             size: 100,
-            output_path: "test.jpg".to_string(),
+            handler_id: None,
+            md5: None,
             sha256: None,
-            is_valid: true,
+            validated: true,
+            truncated: false,
+            errors: Vec::new(),
+            pattern_id: None,
+            is_duplicate: false,
+            duplicate_of_offset: None,
             mime_type: None,
             width: None,
             height: None,
@@ -481,5 +595,25 @@ mod tests {
 
         panel.clear();
         assert!(panel.files.is_empty());
+    }
+
+    #[test]
+    fn test_truncate_chars_preserves_utf8_boundaries() {
+        assert_eq!(truncate_chars("abcdef", 3), "abc...");
+        assert_eq!(truncate_chars("åß∂ƒ©", 3), "åß∂...");
+    }
+
+    #[test]
+    fn test_format_error_list_redacts_path_like_values() {
+        let errors = vec![
+            "failed reading /cases/image.dd at C:\\case\\file.dd via \\\\srv\\share\\img.dd and cases/image.dd".to_string(),
+        ];
+        let formatted = format_error_list(&errors);
+
+        assert!(formatted.contains("[path]"));
+        assert!(!formatted.contains("/cases/image.dd"));
+        assert!(!formatted.contains("C:\\case\\file.dd"));
+        assert!(!formatted.contains("\\\\srv\\share\\img.dd"));
+        assert!(!formatted.contains("cases/image.dd"));
     }
 }

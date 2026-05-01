@@ -1,26 +1,64 @@
 //! Types for carved file metadata
 
+use std::collections::HashMap;
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Carved file metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CarvedFile {
-    /// Unique ID within the scan
+    /// Lodge-local row ID used for selection/display.
+    #[serde(default)]
     pub id: u64,
+    /// SwiftBeaver run ID.
+    #[serde(default)]
+    pub run_id: Option<String>,
     /// Detected file type
+    #[serde(default)]
     pub file_type: String,
-    /// Offset in source evidence
-    pub offset: u64,
+    /// Output path relative to the run's carved directory.
+    #[serde(default, alias = "output_path", alias = "carved_path")]
+    pub path: String,
+    /// File extension reported by SwiftBeaver JSONL metadata.
+    #[serde(default)]
+    pub extension: Option<String>,
+    /// Start offset in source evidence.
+    #[serde(default, alias = "offset")]
+    pub global_start: u64,
+    /// End offset in source evidence.
+    #[serde(default)]
+    pub global_end: u64,
     /// Size in bytes
+    #[serde(default)]
     pub size: u64,
-    /// Output filename
-    pub output_path: String,
+    /// Handler ID used by Parquet file shards.
+    #[serde(default)]
+    pub handler_id: Option<String>,
+    /// MD5 hash of carved file.
+    #[serde(default)]
+    pub md5: Option<String>,
     /// SHA-256 hash of carved file
     #[serde(default)]
     pub sha256: Option<String>,
     /// Whether the file appears valid
+    #[serde(default, alias = "is_valid")]
+    pub validated: bool,
+    /// Whether SwiftBeaver truncated the carve.
     #[serde(default)]
-    pub is_valid: bool,
+    pub truncated: bool,
+    /// Validation or carve errors reported by SwiftBeaver.
+    #[serde(default)]
+    pub errors: Vec<String>,
+    /// Pattern ID that matched this file.
+    #[serde(default)]
+    pub pattern_id: Option<String>,
+    /// Whether this record is a duplicate of an earlier carved file.
+    #[serde(default)]
+    pub is_duplicate: bool,
+    /// Offset of the original file when this row is a duplicate.
+    #[serde(default)]
+    pub duplicate_of_offset: Option<u64>,
     /// MIME type if detected
     #[serde(default)]
     pub mime_type: Option<String>,
@@ -36,12 +74,16 @@ pub struct CarvedFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StringArtefact {
     /// Type: "url", "email", "phone", "string"
+    #[serde(alias = "artefact_kind")]
     pub artefact_type: String,
     /// The extracted value
+    #[serde(alias = "content")]
     pub value: String,
     /// Offset in source evidence
+    #[serde(alias = "global_start")]
     pub offset: u64,
     /// Length in bytes
+    #[serde(default)]
     pub length: u64,
 }
 
@@ -91,11 +133,32 @@ pub struct MetadataSummary {
     /// Total carved files
     pub total_files: usize,
     /// Files by type
-    pub by_type: std::collections::HashMap<String, usize>,
+    pub by_type: HashMap<String, usize>,
     /// Total bytes carved
     pub total_bytes: u64,
     /// String artefacts count
     pub string_artefacts: usize,
+}
+
+impl MetadataSummary {
+    pub fn from_results(files: &[CarvedFile], strings: &[StringArtefact]) -> Result<Self> {
+        let mut by_type: HashMap<String, usize> = HashMap::new();
+        let mut total_bytes = 0u64;
+
+        for file in files {
+            *by_type.entry(file.file_type.clone()).or_insert(0) += 1;
+            total_bytes = total_bytes
+                .checked_add(file.size)
+                .context("Metadata summary total_bytes overflowed")?;
+        }
+
+        Ok(Self {
+            total_files: files.len(),
+            by_type,
+            total_bytes,
+            string_artefacts: strings.len(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -133,9 +196,10 @@ mod tests {
         let file: CarvedFile = serde_json::from_str(json).unwrap();
         assert_eq!(file.id, 1);
         assert_eq!(file.file_type, "jpeg");
-        assert_eq!(file.offset, 1024);
+        assert_eq!(file.global_start, 1024);
         assert_eq!(file.size, 4096);
-        assert!(file.is_valid);
+        assert_eq!(file.path, "output/0001.jpg");
+        assert!(file.validated);
     }
 
     #[test]
