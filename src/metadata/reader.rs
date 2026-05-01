@@ -1,6 +1,6 @@
-//! Metadata reader for Parquet and JSONL files
+//! Metadata reader for Parquet, JSONL, and CSV files
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -40,6 +40,7 @@ impl MetadataReader {
         match self.backend.as_str() {
             "parquet" => self.read_carved_files_parquet(),
             "jsonl" => self.read_carved_files_jsonl(),
+            "csv" => self.read_carved_files_csv(),
             _ => bail!("Unknown metadata backend: {}", self.backend),
         }
     }
@@ -170,11 +171,75 @@ impl MetadataReader {
         Ok(files)
     }
 
+    /// Read carved files from CSV
+    fn read_carved_files_csv(&self) -> Result<Vec<CarvedFile>> {
+        let csv_path = self.run_path.join("metadata").join("carved_files.csv");
+        let mut reader = csv::Reader::from_path(&csv_path)
+            .with_context(|| "Failed to open CSV carved file metadata")?;
+        let headers = reader
+            .headers()
+            .with_context(|| "Failed to read CSV carved file headers")?
+            .clone();
+
+        let mut files = Vec::new();
+        let mut explicit_ids = HashSet::new();
+        let mut missing_id_indexes = Vec::new();
+
+        for (row_index, record) in reader.records().enumerate() {
+            let record = record
+                .with_context(|| format!("Failed to read CSV carved file row {}", row_index + 1))?;
+            let id = match csv_u64_field(&headers, &record, &["id"])? {
+                Some(id) => {
+                    explicit_ids.insert(id);
+                    id
+                }
+                None => {
+                    missing_id_indexes.push(files.len());
+                    0
+                }
+            };
+
+            let file = CarvedFile {
+                id,
+                file_type: csv_string_field(&headers, &record, &["file_type", "type"]),
+                offset: csv_u64_field(&headers, &record, &["offset", "global_start", "start"])?
+                    .unwrap_or(0),
+                size: csv_u64_field(&headers, &record, &["size", "length"])?.unwrap_or(0),
+                output_path: csv_string_field(
+                    &headers,
+                    &record,
+                    &["output_path", "carved_path", "path", "filename"],
+                ),
+                sha256: csv_optional_string_field(&headers, &record, &["sha256", "sha256_hex"]),
+                is_valid: csv_bool_field(&headers, &record, &["is_valid", "validated"])?
+                    .unwrap_or(true),
+                mime_type: csv_optional_string_field(&headers, &record, &["mime_type", "mime"]),
+                width: csv_u32_field(&headers, &record, &["width"])?,
+                height: csv_u32_field(&headers, &record, &["height"])?,
+            };
+            files.push(file);
+        }
+
+        for index in missing_id_indexes {
+            let mut generated_id = index as u64;
+            while explicit_ids.contains(&generated_id) {
+                generated_id = generated_id
+                    .checked_add(1)
+                    .context("Exhausted CSV fallback id space")?;
+            }
+            files[index].id = generated_id;
+            explicit_ids.insert(generated_id);
+        }
+
+        Ok(files)
+    }
+
     /// Read string artefacts
     pub fn read_string_artefacts(&self) -> Result<Vec<StringArtefact>> {
         match self.backend.as_str() {
             "parquet" => self.read_string_artefacts_parquet(),
             "jsonl" => self.read_string_artefacts_jsonl(),
+            "csv" => self.read_string_artefacts_csv(),
             _ => bail!("Unknown metadata backend: {}", self.backend),
         }
     }
@@ -390,6 +455,92 @@ impl MetadataReader {
         Ok(artefacts)
     }
 
+    /// Read string artefacts from CSV
+    fn read_string_artefacts_csv(&self) -> Result<Vec<StringArtefact>> {
+        let metadata_dir = self.run_path.join("metadata");
+        let mut all_artefacts = Vec::new();
+
+        all_artefacts.extend(self.read_named_csv_artefacts(
+            &metadata_dir.join("artefacts_urls.csv"),
+            "url",
+            &["url", "value"],
+        )?);
+        all_artefacts.extend(self.read_named_csv_artefacts(
+            &metadata_dir.join("artefacts_emails.csv"),
+            "email",
+            &["email", "value"],
+        )?);
+        all_artefacts.extend(self.read_named_csv_artefacts(
+            &metadata_dir.join("artefacts_phones.csv"),
+            "phone",
+            &["phone", "number", "value"],
+        )?);
+        all_artefacts.extend(self.read_csv_artefacts(&metadata_dir.join("strings.csv"))?);
+
+        Ok(all_artefacts)
+    }
+
+    fn read_named_csv_artefacts(
+        &self,
+        path: &Path,
+        artefact_type: &str,
+        value_columns: &[&str],
+    ) -> Result<Vec<StringArtefact>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        self.read_csv_artefact_file(path, Some(artefact_type), value_columns)
+    }
+
+    fn read_csv_artefacts(&self, path: &Path) -> Result<Vec<StringArtefact>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        self.read_csv_artefact_file(path, None, &["value", "string"])
+    }
+
+    fn read_csv_artefact_file(
+        &self,
+        path: &Path,
+        fixed_type: Option<&str>,
+        value_columns: &[&str],
+    ) -> Result<Vec<StringArtefact>> {
+        let mut reader = csv::Reader::from_path(path)
+            .with_context(|| "Failed to open CSV string artefact metadata")?;
+        let headers = reader
+            .headers()
+            .with_context(|| "Failed to read CSV string artefact headers")?
+            .clone();
+
+        let mut artefacts = Vec::new();
+
+        for (row_index, record) in reader.records().enumerate() {
+            let record = record.with_context(|| {
+                format!("Failed to read CSV string artefact row {}", row_index + 1)
+            })?;
+            let offset = csv_u64_field(&headers, &record, &["offset", "global_start", "start"])?
+                .unwrap_or(0);
+            let end = csv_u64_field(&headers, &record, &["global_end", "end"])?;
+            let length = csv_u64_field(&headers, &record, &["length"])?
+                .or_else(|| end.map(|end| end.saturating_sub(offset)))
+                .unwrap_or(0);
+            let artefact_type = fixed_type
+                .map(str::to_string)
+                .unwrap_or_else(|| csv_string_field(&headers, &record, &["artefact_type", "type"]));
+
+            artefacts.push(StringArtefact {
+                artefact_type,
+                value: csv_string_field(&headers, &record, value_columns),
+                offset,
+                length,
+            });
+        }
+
+        Ok(artefacts)
+    }
+
     /// Get summary of metadata
     pub fn get_summary(&self) -> Result<MetadataSummary> {
         let files = self.read_carved_files()?;
@@ -410,6 +561,82 @@ impl MetadataReader {
             string_artefacts: strings.len(),
         })
     }
+}
+
+fn csv_field<'a>(
+    headers: &csv::StringRecord,
+    record: &'a csv::StringRecord,
+    names: &[&str],
+) -> Option<&'a str> {
+    names.iter().find_map(|name| {
+        headers
+            .iter()
+            .position(|header| header == *name)
+            .and_then(|index| record.get(index))
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn csv_string_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> String {
+    csv_field(headers, record, names)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn csv_optional_string_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> Option<String> {
+    csv_field(headers, record, names).map(ToOwned::to_owned)
+}
+
+fn csv_u64_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> Result<Option<u64>> {
+    csv_field(headers, record, names)
+        .map(|value| {
+            value
+                .trim()
+                .parse::<u64>()
+                .with_context(|| format!("Invalid unsigned integer CSV value: {}", value))
+        })
+        .transpose()
+}
+
+fn csv_u32_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> Result<Option<u32>> {
+    csv_field(headers, record, names)
+        .map(|value| {
+            value
+                .trim()
+                .parse::<u32>()
+                .with_context(|| format!("Invalid unsigned integer CSV value: {}", value))
+        })
+        .transpose()
+}
+
+fn csv_bool_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> Result<Option<bool>> {
+    csv_field(headers, record, names)
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "y" => Ok(true),
+            "false" | "0" | "no" | "n" => Ok(false),
+            _ => bail!("Invalid boolean CSV value: {}", value),
+        })
+        .transpose()
 }
 
 #[cfg(test)]
@@ -460,6 +687,129 @@ mod tests {
     }
 
     #[test]
+    fn test_reader_csv_with_data() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data = r#"id,file_type,global_start,size,carved_path,sha256,validated,mime_type,width,height
+7,jpeg,1024,4096,"carved/with, comma.jpg",abc123,true,image/jpeg,800,600
+,png,5120,2048,carved/2.png,,false,,,"#;
+        fs::write(metadata_dir.join("carved_files.csv"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        assert_eq!(reader.backend(), "csv");
+
+        let files = reader.read_carved_files().unwrap();
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].id, 7);
+        assert_eq!(files[0].file_type, "jpeg");
+        assert_eq!(files[0].offset, 1024);
+        assert_eq!(files[0].size, 4096);
+        assert_eq!(files[0].output_path, "carved/with, comma.jpg");
+        assert_eq!(files[0].sha256.as_deref(), Some("abc123"));
+        assert!(files[0].is_valid);
+        assert_eq!(files[0].mime_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(files[0].width, Some(800));
+        assert_eq!(files[0].height, Some(600));
+        assert_eq!(files[1].id, 1);
+        assert_eq!(files[1].sha256, None);
+        assert!(!files[1].is_valid);
+        assert_eq!(files[1].mime_type, None);
+        assert_eq!(files[1].width, None);
+        assert_eq!(files[1].height, None);
+    }
+
+    #[test]
+    fn test_reader_csv_missing_artefacts_are_empty() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let artefacts = reader.read_string_artefacts().unwrap();
+
+        assert!(artefacts.is_empty());
+    }
+
+    #[test]
+    fn test_reader_csv_string_artefacts() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("artefacts_urls.csv"),
+            "url,global_start,global_end\nhttps://example.test,10,30\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("strings.csv"),
+            "type,value,offset,length\nstring,hello,40,5\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let artefacts = reader.read_string_artefacts().unwrap();
+
+        assert_eq!(artefacts.len(), 2);
+        assert_eq!(artefacts[0].artefact_type, "url");
+        assert_eq!(artefacts[0].value, "https://example.test");
+        assert_eq!(artefacts[0].offset, 10);
+        assert_eq!(artefacts[0].length, 20);
+        assert_eq!(artefacts[1].artefact_type, "string");
+        assert_eq!(artefacts[1].value, "hello");
+        assert_eq!(artefacts[1].offset, 40);
+        assert_eq!(artefacts[1].length, 5);
+    }
+
+    #[test]
+    fn test_reader_csv_rejects_malformed_numeric_field() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,not-a-number,100,1.jpg\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let result = reader.read_carved_files();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reader_csv_missing_ids_do_not_collide_with_explicit_ids() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "id,file_type,global_start,size,carved_path\n1,jpeg,0,100,1.jpg\n,png,100,200,2.png\n,gif,300,50,3.gif\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let files = reader.read_carved_files().unwrap();
+
+        assert_eq!(files[0].id, 1);
+        assert_eq!(files[1].id, 2);
+        assert_eq!(files[2].id, 3);
+    }
+
+    #[test]
     fn test_reader_summary() {
         let temp = TempDir::new().unwrap();
         let metadata_dir = temp.path().join("metadata");
@@ -469,6 +819,27 @@ mod tests {
 {"id":2,"file_type":"jpeg","offset":1000,"size":2000,"output_path":"2.jpg","is_valid":true}
 {"id":3,"file_type":"png","offset":3000,"size":500,"output_path":"3.png","is_valid":true}"#;
         fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let summary = reader.get_summary().unwrap();
+
+        assert_eq!(summary.total_files, 3);
+        assert_eq!(summary.total_bytes, 3500);
+        assert_eq!(summary.by_type.get("jpeg"), Some(&2));
+        assert_eq!(summary.by_type.get("png"), Some(&1));
+    }
+
+    #[test]
+    fn test_reader_csv_summary() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data = r#"file_type,global_start,size,carved_path
+jpeg,0,1000,1.jpg
+jpeg,1000,2000,2.jpg
+png,3000,500,3.png"#;
+        fs::write(metadata_dir.join("carved_files.csv"), data).unwrap();
 
         let reader = MetadataReader::new(temp.path()).unwrap();
         let summary = reader.get_summary().unwrap();

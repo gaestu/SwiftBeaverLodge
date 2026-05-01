@@ -1,4 +1,4 @@
-//! Metadata reading from Parquet and JSONL files
+//! Metadata reading from Parquet, JSONL, and CSV files
 
 mod reader;
 mod types;
@@ -18,6 +18,8 @@ pub fn detect_metadata_backend(run_path: &Path) -> Option<&'static str> {
         .exists()
     {
         Some("jsonl")
+    } else if run_path.join("metadata").join("carved_files.csv").exists() {
+        Some("csv")
     } else {
         None
     }
@@ -45,6 +47,16 @@ mod tests {
         fs::write(metadata_dir.join("carved_files.jsonl"), "").unwrap();
 
         assert_eq!(detect_metadata_backend(temp.path()), Some("jsonl"));
+    }
+
+    #[test]
+    fn test_detect_csv_backend() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(metadata_dir.join("carved_files.csv"), "").unwrap();
+
+        assert_eq!(detect_metadata_backend(temp.path()), Some("csv"));
     }
 
     #[test]

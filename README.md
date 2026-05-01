@@ -130,7 +130,7 @@ SwiftBeaverLodge/
 │   │   └── progress.rs   # Progress parsing
 │   ├── metadata/         # Result reading
 │   │   ├── mod.rs        # Module exports
-│   │   ├── reader.rs     # Parquet/JSONL reader
+│   │   ├── reader.rs     # Parquet/JSONL/CSV reader
 │   │   └── types.rs      # Metadata types
 │   └── ui/               # UI components
 │       ├── mod.rs        # Tab enum, exports
@@ -201,7 +201,7 @@ cargo test -- --nocapture
 
 - **[egui](https://github.com/emilk/egui)** - Immediate-mode GUI (pure Rust)
 - **[eframe](https://github.com/emilk/egui/tree/master/crates/eframe)** - egui framework
-- **[parquet](https://crates.io/crates/parquet) + [arrow](https://crates.io/crates/arrow)** - Metadata reading
+- **[parquet](https://crates.io/crates/parquet) + [arrow](https://crates.io/crates/arrow) + [csv](https://crates.io/crates/csv)** - Metadata reading
 - **[tokio](https://tokio.rs/)** - Async runtime
 - **[rfd](https://crates.io/crates/rfd)** - Native file dialogs
 
