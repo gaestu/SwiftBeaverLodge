@@ -458,6 +458,14 @@ impl ConfigPanel {
                 // Chunk overlap
                 ui.label(RichText::new("Chunking").strong());
                 ui.horizontal(|ui| {
+                    ui.label("Chunk size (MiB):");
+                    ui.add(
+                        egui::DragValue::new(&mut config.chunk_size_mib)
+                            .speed(1)
+                            .range(1..=4096),
+                    );
+                });
+                ui.horizontal(|ui| {
                     ui.label("Overlap (KiB):");
                     let mut has_overlap = config.overlap_kib.is_some();
                     if ui.checkbox(&mut has_overlap, "").changed() {
@@ -467,6 +475,12 @@ impl ConfigPanel {
                         ui.add(egui::DragValue::new(v).speed(1).range(0..=4096));
                     }
                 });
+                ui.label(
+                    RichText::new(
+                        "Resumed scans must use the same chunk size and overlap as the checkpointed scan.",
+                    )
+                    .weak(),
+                );
                 ui.horizontal(|ui| {
                     ui.label("Max chunks:");
                     let mut has = config.max_chunks.is_some();
@@ -694,6 +708,22 @@ impl ConfigPanel {
                         }
                     }
                 });
+                let resume_active = config
+                    .resume_from
+                    .as_ref()
+                    .is_some_and(|path| !path.is_empty());
+                if resume_active {
+                    ui.colored_label(
+                        Color32::YELLOW,
+                        "Resume mode active: this scan will continue from the selected checkpoint.",
+                    );
+                }
+                ui.label(
+                    RichText::new(
+                        "Checkpoint files are written by SwiftBeaver during early exit. Resume only with matching chunk size and overlap.",
+                    )
+                    .weak(),
+                );
 
                 ui.add_space(10.0);
 
@@ -760,8 +790,8 @@ impl ConfigPanel {
     }
 }
 
-/// Validate configuration and return issues
-fn validate_config(config: &ScanConfig) -> Vec<String> {
+/// Validate configuration and return issues.
+pub(crate) fn validate_config(config: &ScanConfig) -> Vec<String> {
     let mut issues = Vec::new();
 
     if config.input_path.is_empty() {
@@ -776,6 +806,21 @@ fn validate_config(config: &ScanConfig) -> Vec<String> {
 
     if config.file_types.is_empty() {
         issues.push("At least one file type must be selected".to_string());
+    }
+
+    if let Some(path) = config.resume_from.as_ref().filter(|p| !p.is_empty()) {
+        if !std::path::Path::new(path).is_file() {
+            issues.push("Resume checkpoint file does not exist".to_string());
+        }
+    }
+
+    if let Some(path) = config.checkpoint_path.as_ref().filter(|p| !p.is_empty()) {
+        let checkpoint_path = std::path::Path::new(path);
+        if let Some(parent) = checkpoint_path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                issues.push("Checkpoint directory does not exist".to_string());
+            }
+        }
     }
 
     issues.extend(validate_flag_combinations(config));

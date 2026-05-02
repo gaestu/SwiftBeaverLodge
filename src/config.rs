@@ -277,6 +277,10 @@ pub fn validate_flag_combinations(config: &ScanConfig) -> Vec<String> {
         }
     }
 
+    if config.chunk_size_mib == 0 {
+        issues.push("--chunk-size-mib must be greater than zero".to_string());
+    }
+
     // Forensic safety: never allow checkpoint writes targeting evidence.
     if let Some(ckpt) = config.checkpoint_path.as_ref().filter(|p| !p.is_empty()) {
         if !config.input_path.is_empty() && paths_refer_to_same_target(ckpt, &config.input_path) {

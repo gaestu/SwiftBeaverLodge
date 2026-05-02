@@ -157,6 +157,8 @@ SwiftBeaverLodge/
 | String Scanning | Extract URLs/emails/phones | enabled |
 | GPU Acceleration | Use GPU for faster scanning (`--gpu`) | disabled |
 | Evidence Hash | Compute SHA-256 of evidence | enabled |
+| Chunking | Chunk size and optional overlap | 64 MiB, SwiftBeaver default overlap |
+| Checkpoint / Resume | Write checkpoint state on early exit or resume from an existing checkpoint | disabled |
 | Run Mode | Normal, dry-run, or metadata-only scanning | normal |
 | Validation | Validate carved files and optionally remove invalid files | disabled |
 | Hashing & Deduplication | Select `md5`/`sha256`, track duplicates, optionally skip duplicate file bodies | SwiftBeaver default hashes, dedupe disabled |
@@ -171,6 +173,16 @@ Advanced options expose SwiftBeaver v0.5.1's storage-management controls:
 - **Hash algorithms** emits `--hash-algorithms` only when at least one algorithm is selected. Leaving the list empty lets SwiftBeaver use its default `md5,sha256` set.
 - **Track duplicates** (`--dedupe`) requires SHA-256 hashing. If explicit hashes are selected in the GUI, `sha256` is kept enabled for dedupe.
 - **Skip duplicate file bodies** (`--skip-duplicates`) is only available with dedupe when carved file bodies are being written; duplicate rows remain in metadata while duplicate file contents are not written again.
+
+### Checkpoint and resume
+
+Advanced options expose SwiftBeaver v0.5.1's long-scan checkpoint workflow:
+
+- **Checkpoint path** emits `--checkpoint-path` and asks SwiftBeaver to write checkpoint state to that file when the scan exits early.
+- **Resume from** emits `--resume-from` and makes the start action show **Resume Scan** before launch.
+- **Chunk size** always emits `--chunk-size-mib` so each launched scan records explicit chunk geometry. **Overlap** emits `--overlap-kib` when enabled.
+- Resumed scans must use the same chunk size and overlap as the scan that created the checkpoint. Lodge shows this warning in the Configure tab and rejects missing resume checkpoint files before launching SwiftBeaver.
+- When stopping a running scan, Lodge requests a graceful SwiftBeaver shutdown and keeps draining process output so a configured checkpoint has time to be written.
 
 ### Supported file type categories
 
