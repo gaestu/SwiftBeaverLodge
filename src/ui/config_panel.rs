@@ -750,6 +750,16 @@ impl ConfigPanel {
                         }
                     }
                 });
+                if config
+                    .config_path
+                    .as_ref()
+                    .is_some_and(|path| !path.is_empty())
+                {
+                    ui.colored_label(
+                        Color32::YELLOW,
+                        "SwiftBeaver YAML config active: Lodge GUI options are passed as CLI flags and override matching YAML values.",
+                    );
+                }
 
                 ui.add_space(10.0);
 
@@ -808,6 +818,14 @@ pub(crate) fn validate_config(config: &ScanConfig) -> Vec<String> {
         issues.push("At least one file type must be selected".to_string());
     }
 
+    if let Some(path) = config.config_path.as_ref() {
+        if path.is_empty() {
+            issues.push("SwiftBeaver YAML config path is required when enabled".to_string());
+        } else if !std::path::Path::new(path).is_file() {
+            issues.push("SwiftBeaver YAML config file does not exist".to_string());
+        }
+    }
+
     if let Some(path) = config.resume_from.as_ref().filter(|p| !p.is_empty()) {
         if !std::path::Path::new(path).is_file() {
             issues.push("Resume checkpoint file does not exist".to_string());
@@ -832,6 +850,15 @@ pub(crate) fn validate_config(config: &ScanConfig) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn valid_config_with_input(input_path: String) -> ScanConfig {
+        ScanConfig {
+            input_path,
+            output_path: "/tmp/output".to_string(),
+            file_types: vec!["jpeg".to_string()],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_validate_empty_config() {
         let config = ScanConfig {
@@ -847,15 +874,52 @@ mod tests {
 
     #[test]
     fn test_validate_valid_config() {
-        let config = ScanConfig {
-            input_path: "/tmp".to_string(), // exists on most systems
-            output_path: "/tmp/output".to_string(),
-            file_types: vec!["jpeg".to_string()],
-            ..Default::default()
-        };
+        let config = valid_config_with_input("/tmp".to_string()); // exists on most systems
 
         let issues = validate_config(&config);
         assert!(issues.is_empty() || issues.len() == 1); // May not exist
+    }
+
+    #[test]
+    fn validate_config_requires_yaml_path_when_enabled() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        let mut config = valid_config_with_input(input.path().display().to_string());
+        config.config_path = Some(String::new());
+
+        let issues = validate_config(&config);
+
+        assert!(issues
+            .iter()
+            .any(|issue| issue == "SwiftBeaver YAML config path is required when enabled"));
+    }
+
+    #[test]
+    fn validate_config_rejects_missing_yaml_config_file() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = valid_config_with_input(input.path().display().to_string());
+        config.config_path = Some(temp.path().join("missing.yaml").display().to_string());
+
+        let issues = validate_config(&config);
+
+        assert!(issues
+            .iter()
+            .any(|issue| issue == "SwiftBeaver YAML config file does not exist"));
+    }
+
+    #[test]
+    fn validate_config_accepts_existing_yaml_config_file() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        let yaml = tempfile::NamedTempFile::new().unwrap();
+        let mut config = valid_config_with_input(input.path().display().to_string());
+        config.config_path = Some(yaml.path().display().to_string());
+
+        let issues = validate_config(&config);
+
+        assert!(
+            issues.is_empty(),
+            "unexpected validation issues: {issues:?}"
+        );
     }
 
     #[test]

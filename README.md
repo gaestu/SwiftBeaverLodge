@@ -158,12 +158,33 @@ SwiftBeaverLodge/
 | Metadata Format | parquet/jsonl/csv | parquet |
 | String Scanning | Extract URLs/emails/phones | enabled |
 | GPU Acceleration | Use GPU for faster scanning (`--gpu`) | disabled |
+| SwiftBeaver YAML Config | Pass an expert SwiftBeaver YAML file with `--config-path` | disabled |
 | Evidence Hash | Compute SHA-256 of evidence | enabled |
 | Chunking | Chunk size and optional overlap | 64 MiB, SwiftBeaver default overlap |
 | Checkpoint / Resume | Write checkpoint state on early exit or resume from an existing checkpoint | disabled |
 | Run Mode | Normal, dry-run, or metadata-only scanning | normal |
 | Validation | Validate carved files and optionally remove invalid files | disabled |
 | Hashing & Deduplication | Select `md5`/`sha256`, track duplicates, optionally skip duplicate file bodies | SwiftBeaver default hashes, dedupe disabled |
+
+### SwiftBeaver YAML configs
+
+Advanced options can pass an existing SwiftBeaver YAML configuration file to
+the engine with `--config-path`. This is for expert SwiftBeaver settings that
+Lodge does not model directly, such as QuickTime mode, EWF cache handles, GPU
+device indexes, and per-carver limits.
+
+- Select **Use --config-path** in the Configure tab, then enter a path or pick a
+  `.yaml` / `.yml` file. Lodge reports missing or invalid config paths before
+  launch.
+- SwiftBeaver loads the YAML file first, then applies Lodge's generated CLI
+  arguments. GUI-controlled fields such as input, output, metadata backend,
+  selected file types, string scanning toggles, GPU enablement, resource limits,
+  chunking, run mode, validation, hashing, dedupe, and checkpoint options
+  intentionally override matching YAML values.
+- YAML-only SwiftBeaver settings remain delegated to SwiftBeaver. Lodge does not
+  parse, edit, or save the full SwiftBeaver YAML schema.
+- Lodge presets, if added later, should remain a separate Lodge format rather
+  than being conflated with SwiftBeaver YAML configs.
 
 ### Scan modes, validation, and dedupe
 
