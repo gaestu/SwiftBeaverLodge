@@ -258,7 +258,7 @@ impl ConfigPanel {
 
             // File types (organized by category)
             ui.group(|ui| {
-                ui.label(RichText::new("File Types to Carve").strong());
+                ui.label(RichText::new("File Type Filters").strong());
                 ui.add_space(5.0);
 
                 ui.horizontal_wrapped(|ui| {

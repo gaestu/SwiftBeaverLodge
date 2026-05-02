@@ -183,13 +183,15 @@ impl MetadataBackend {
     }
 }
 
-/// Available file types for carving, grouped by category for the UI.
+/// Available SwiftBeaver file-type filters, grouped by category for the UI.
 ///
 /// Each tuple is `(category_name, icon, &[file_type])`. The file type strings
 /// are the exact identifiers accepted by SwiftBeaver v0.5.1's
-/// `--types` / `--enable-types` flags. Adding a value here that SwiftBeaver
-/// does not recognise will cause `unknown file type in --types` warnings at
-/// runtime, so this catalog is kept aligned with the bundled binary.
+/// `--types` / `--enable-types` flags. Some identifiers are classified outputs
+/// of container handlers, such as `docx` from ZIP and `doc` from OLE. Adding a
+/// value here that SwiftBeaver does not recognise will cause `unknown file type
+/// in --types` warnings at runtime, so this catalog is kept aligned with the
+/// bundled binary.
 pub const FILE_TYPES: &[(&str, &str, &[&str])] = &[
     (
         "Images",
@@ -200,7 +202,8 @@ pub const FILE_TYPES: &[(&str, &str, &[&str])] = &[
         "Documents",
         "📄",
         &[
-            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "eml",
+            "pdf", "ole", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
+            "eml",
         ],
     ),
     ("eBooks", "📚", &["epub", "mobi", "fb2", "lrf"]),
@@ -226,11 +229,10 @@ pub const FILE_TYPES: &[(&str, &str, &[&str])] = &[
 /// File types whose carving relies on the ZIP carver and are therefore
 /// skipped when SwiftBeaver is invoked with `--disable-zip`.
 ///
-/// SwiftBeaver v0.5.1 documents this as "skips zip/docx/xlsx/pptx" in its
-/// `--disable-zip` help text. Other ZIP-structured formats (epub, odt, ods,
-/// odp) are not enumerated by upstream as `--disable-zip`-affected, so they
-/// are intentionally not included here.
-pub const ZIP_DERIVED_TYPES: &[&str] = &["zip", "docx", "xlsx", "pptx"];
+/// SwiftBeaver treats these as ZIP handler outputs. When invoked with
+/// `--disable-zip`, all of them are skipped.
+pub const ZIP_DERIVED_TYPES: &[&str] =
+    &["zip", "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub"];
 
 /// Hash algorithms recognised by SwiftBeaver's `--hash-algorithms` flag.
 pub const SUPPORTED_HASH_ALGORITHMS: &[&str] = &["md5", "sha256"];
@@ -400,6 +402,12 @@ mod tests {
     }
 
     #[test]
+    fn zip_derived_types_cover_swiftbeaver_zip_handler_classifications() {
+        let expected = ["zip", "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub"];
+        assert_eq!(ZIP_DERIVED_TYPES, expected.as_slice());
+    }
+
+    #[test]
     fn validate_flag_combinations_rejects_dedupe_without_explicit_sha256() {
         let config = ScanConfig {
             dedupe: true,
@@ -468,6 +476,7 @@ mod tests {
             "ico",
             // Documents
             "pdf",
+            "ole",
             "doc",
             "docx",
             "xls",

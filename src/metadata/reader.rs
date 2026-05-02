@@ -14,7 +14,9 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 
-use super::types::{CarvedFile, MetadataRecord, RunSummary, StringArtefact};
+use super::types::{
+    CarvedFile, MetadataRecord, ResultTableAvailability, RunSummary, StringArtefact,
+};
 
 /// Reader for scan metadata
 #[derive(Clone)]
@@ -357,6 +359,17 @@ impl MetadataReader {
     /// Read entropy regions.
     pub fn read_entropy_regions(&self) -> Result<Vec<MetadataRecord>> {
         self.read_table_records("entropy_regions")
+    }
+
+    /// Check which optional result tables exist without reading their rows.
+    pub fn result_table_availability(&self) -> Result<ResultTableAvailability> {
+        Ok(ResultTableAvailability {
+            browser_history: self.table_exists("browser_history")?,
+            browser_cookies: self.table_exists("browser_cookies")?,
+            browser_downloads: self.table_exists("browser_downloads")?,
+            windows_artefacts: self.table_exists("windows_artefacts")?,
+            entropy_regions: self.table_exists("entropy_regions")?,
+        })
     }
 
     /// Read string artefacts from Parquet
@@ -778,6 +791,39 @@ impl MetadataReader {
         }
     }
 
+    fn table_exists(&self, stem: &str) -> Result<bool> {
+        match self.backend.as_str() {
+            "parquet" => self.parquet_table_exists(stem),
+            "jsonl" => Ok(self
+                .run_path
+                .join("metadata")
+                .join(format!("{stem}.jsonl"))
+                .exists()),
+            "csv" => Ok(self
+                .run_path
+                .join("metadata")
+                .join(format!("{stem}.csv"))
+                .exists()),
+            _ => bail!("Unknown metadata backend: {}", self.backend),
+        }
+    }
+
+    fn parquet_table_exists(&self, stem: &str) -> Result<bool> {
+        let parquet_dir = self.run_path.join("parquet");
+        if !parquet_dir.exists() {
+            return Ok(false);
+        }
+
+        for entry in std::fs::read_dir(&parquet_dir)? {
+            let entry = entry?;
+            if parquet_file_matches_stem(&entry.path(), stem) {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     fn read_parquet_records_for_stem(&self, stem: &str) -> Result<Vec<MetadataRecord>> {
         let parquet_dir = self.run_path.join("parquet");
         if !parquet_dir.exists() {
@@ -788,20 +834,7 @@ impl MetadataReader {
         for entry in std::fs::read_dir(&parquet_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map(|e| e == "parquet").unwrap_or(false)
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| {
-                        name == format!("{stem}.parquet")
-                            || name
-                                .strip_prefix(stem)
-                                .and_then(|suffix| suffix.strip_prefix('_'))
-                                .map(|_| true)
-                                .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
-            {
+            if parquet_file_matches_stem(&path, stem) {
                 paths.push(path);
             }
         }
@@ -899,6 +932,24 @@ impl MetadataReader {
 
         Ok(records)
     }
+}
+
+fn parquet_file_matches_stem(path: &Path, stem: &str) -> bool {
+    path.extension().map(|e| e == "parquet").unwrap_or(false)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name == format!("{stem}.parquet")
+                    || name
+                        .strip_suffix(".parquet")
+                        .and_then(|name_without_extension| {
+                            name_without_extension.strip_prefix(stem)
+                        })
+                        .and_then(|suffix| suffix.strip_prefix('_'))
+                        .is_some()
+            })
+            .unwrap_or(false)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1753,6 +1804,26 @@ mod tests {
     }
 
     #[test]
+    fn test_reader_jsonl_result_table_availability() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(metadata_dir.join("carved_files.jsonl"), "").unwrap();
+        fs::write(metadata_dir.join("browser_history.jsonl"), "").unwrap();
+        fs::write(metadata_dir.join("browser_cookies.jsonl"), "").unwrap();
+        fs::write(metadata_dir.join("windows_artefacts.jsonl"), "").unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let availability = reader.result_table_availability().unwrap();
+
+        assert!(availability.browser_history);
+        assert!(availability.browser_cookies);
+        assert!(!availability.browser_downloads);
+        assert!(availability.windows_artefacts);
+        assert!(!availability.entropy_regions);
+    }
+
+    #[test]
     fn test_reader_parquet_v051_with_data() {
         let temp = TempDir::new().unwrap();
         let parquet_dir = temp.path().join("parquet");
@@ -1819,6 +1890,25 @@ mod tests {
             Some("https://example.test")
         );
         assert!(entropy.is_empty());
+    }
+
+    #[test]
+    fn test_reader_parquet_result_table_availability_matches_stem_files() {
+        let temp = TempDir::new().unwrap();
+        let parquet_dir = temp.path().join("parquet");
+        fs::create_dir(&parquet_dir).unwrap();
+        fs::write(parquet_dir.join("browser_history_0000.parquet"), "").unwrap();
+        fs::write(parquet_dir.join("browser_downloads.parquet"), "").unwrap();
+        fs::write(parquet_dir.join("browser_cookies.csv"), "").unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let availability = reader.result_table_availability().unwrap();
+
+        assert!(availability.browser_history);
+        assert!(!availability.browser_cookies);
+        assert!(availability.browser_downloads);
+        assert!(!availability.windows_artefacts);
+        assert!(!availability.entropy_regions);
     }
 
     #[test]

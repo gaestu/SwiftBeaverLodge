@@ -5,7 +5,8 @@ use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crate::metadata::{
-    CarvedFile, MetadataReader, MetadataRecord, MetadataSummary, RunSummary, StringArtefact,
+    CarvedFile, MetadataReader, MetadataRecord, MetadataSummary, ResultTableAvailability,
+    RunSummary, StringArtefact,
 };
 use crate::scan::{format_bytes, ScanState};
 
@@ -37,6 +38,8 @@ pub struct ResultsPanel {
     windows_artefacts: Option<Vec<MetadataRecord>>,
     /// Cached entropy regions
     entropy_regions: Option<Vec<MetadataRecord>>,
+    /// Optional metadata tables present in the current run.
+    available_tables: ResultTableAvailability,
     /// Current tab
     current_tab: ResultsTab,
     /// File type filter
@@ -110,6 +113,7 @@ impl ResultsPanel {
             browser_downloads: None,
             windows_artefacts: None,
             entropy_regions: None,
+            available_tables: ResultTableAvailability::default(),
             current_tab: ResultsTab::Overview,
             type_filter: None,
             search_query: String::new(),
@@ -157,6 +161,14 @@ impl ResultsPanel {
                 self.summary = Some(summary);
                 self.files = files;
                 self.strings = strings;
+                self.available_tables = match reader.result_table_availability() {
+                    Ok(available_tables) => available_tables,
+                    Err(e) => {
+                        self.push_error("Failed to inspect optional result tables", &e);
+                        ResultTableAvailability::default()
+                    }
+                };
+                self.ensure_current_tab_available();
                 self.reader = Some(reader);
             }
             Err(e) => {
@@ -184,6 +196,7 @@ impl ResultsPanel {
         self.browser_downloads = None;
         self.windows_artefacts = None;
         self.entropy_regions = None;
+        self.available_tables = ResultTableAvailability::default();
         self.type_filter = None;
         self.search_query.clear();
         self.selected_file = None;
@@ -353,31 +366,41 @@ impl ResultsPanel {
                 ResultsTab::Strings,
                 format!("Strings ({})", self.strings.len()),
             );
-            ui.selectable_value(
-                &mut self.current_tab,
-                ResultsTab::BrowserHistory,
-                tab_label("History", self.browser_history.as_ref()),
-            );
-            ui.selectable_value(
-                &mut self.current_tab,
-                ResultsTab::BrowserCookies,
-                tab_label("Cookies", self.browser_cookies.as_ref()),
-            );
-            ui.selectable_value(
-                &mut self.current_tab,
-                ResultsTab::BrowserDownloads,
-                tab_label("Downloads", self.browser_downloads.as_ref()),
-            );
-            ui.selectable_value(
-                &mut self.current_tab,
-                ResultsTab::WindowsArtefacts,
-                tab_label("Windows", self.windows_artefacts.as_ref()),
-            );
-            ui.selectable_value(
-                &mut self.current_tab,
-                ResultsTab::EntropyRegions,
-                tab_label("Entropy", self.entropy_regions.as_ref()),
-            );
+            if self.available_tables.browser_history {
+                ui.selectable_value(
+                    &mut self.current_tab,
+                    ResultsTab::BrowserHistory,
+                    tab_label("History", self.browser_history.as_ref()),
+                );
+            }
+            if self.available_tables.browser_cookies {
+                ui.selectable_value(
+                    &mut self.current_tab,
+                    ResultsTab::BrowserCookies,
+                    tab_label("Cookies", self.browser_cookies.as_ref()),
+                );
+            }
+            if self.available_tables.browser_downloads {
+                ui.selectable_value(
+                    &mut self.current_tab,
+                    ResultsTab::BrowserDownloads,
+                    tab_label("Downloads", self.browser_downloads.as_ref()),
+                );
+            }
+            if self.available_tables.windows_artefacts {
+                ui.selectable_value(
+                    &mut self.current_tab,
+                    ResultsTab::WindowsArtefacts,
+                    tab_label("Windows", self.windows_artefacts.as_ref()),
+                );
+            }
+            if self.available_tables.entropy_regions {
+                ui.selectable_value(
+                    &mut self.current_tab,
+                    ResultsTab::EntropyRegions,
+                    tab_label("Entropy", self.entropy_regions.as_ref()),
+                );
+            }
         });
         if self.current_tab != previous_tab {
             self.search_query.clear();
@@ -395,6 +418,23 @@ impl ResultsPanel {
             ResultsTab::BrowserDownloads => self.show_browser_downloads(ui),
             ResultsTab::WindowsArtefacts => self.show_windows_artefacts(ui),
             ResultsTab::EntropyRegions => self.show_entropy_regions(ui),
+        }
+    }
+
+    fn ensure_current_tab_available(&mut self) {
+        if !self.is_tab_available(self.current_tab) {
+            self.current_tab = ResultsTab::Files;
+        }
+    }
+
+    fn is_tab_available(&self, tab: ResultsTab) -> bool {
+        match tab {
+            ResultsTab::Overview | ResultsTab::Files | ResultsTab::Strings => true,
+            ResultsTab::BrowserHistory => self.available_tables.browser_history,
+            ResultsTab::BrowserCookies => self.available_tables.browser_cookies,
+            ResultsTab::BrowserDownloads => self.available_tables.browser_downloads,
+            ResultsTab::WindowsArtefacts => self.available_tables.windows_artefacts,
+            ResultsTab::EntropyRegions => self.available_tables.entropy_regions,
         }
     }
 
@@ -1425,6 +1465,31 @@ mod tests {
         panel.current_tab = ResultsTab::BrowserHistory;
         panel.prepare_live_run("/tmp/run-two");
         assert_eq!(panel.current_tab, ResultsTab::Files);
+    }
+
+    #[test]
+    fn test_unavailable_optional_tab_falls_back_to_files() {
+        let mut panel = ResultsPanel::new();
+        panel.current_tab = ResultsTab::BrowserHistory;
+        panel.available_tables = ResultTableAvailability::default();
+
+        panel.ensure_current_tab_available();
+
+        assert_eq!(panel.current_tab, ResultsTab::Files);
+    }
+
+    #[test]
+    fn test_available_optional_tab_is_preserved() {
+        let mut panel = ResultsPanel::new();
+        panel.current_tab = ResultsTab::WindowsArtefacts;
+        panel.available_tables = ResultTableAvailability {
+            windows_artefacts: true,
+            ..Default::default()
+        };
+
+        panel.ensure_current_tab_available();
+
+        assert_eq!(panel.current_tab, ResultsTab::WindowsArtefacts);
     }
 
     #[test]

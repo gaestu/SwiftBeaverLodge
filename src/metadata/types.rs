@@ -125,6 +125,16 @@ impl MetadataRecord {
     }
 }
 
+/// Optional result tables emitted by SwiftBeaver for a run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResultTableAvailability {
+    pub browser_history: bool,
+    pub browser_cookies: bool,
+    pub browser_downloads: bool,
+    pub windows_artefacts: bool,
+    pub entropy_regions: bool,
+}
+
 /// Run-level metrics emitted by SwiftBeaver v0.5.1.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunSummary {
