@@ -1,20 +1,20 @@
 //! Metadata reader for Parquet, JSONL, and CSV files
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use arrow::array::{
-    Array, BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array, StringArray, UInt16Array,
-    UInt32Array, UInt64Array, UInt8Array,
+    Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    LargeStringArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 
-use super::types::{CarvedFile, StringArtefact};
+use super::types::{CarvedFile, MetadataRecord, RunSummary, StringArtefact};
 
 /// Reader for scan metadata
 pub struct MetadataReader {
@@ -266,9 +266,49 @@ impl MetadataReader {
         }
     }
 
+    /// Read the run summary if SwiftBeaver emitted one.
+    pub fn read_run_summary(&self) -> Result<Option<RunSummary>> {
+        let mut records = self.read_table_records("run_summary")?;
+        Ok(records.pop().map(RunSummary::from_record))
+    }
+
+    /// Read browser history artefacts.
+    pub fn read_browser_history(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("browser_history")
+    }
+
+    /// Read browser cookie artefacts.
+    pub fn read_browser_cookies(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("browser_cookies")
+    }
+
+    /// Read browser download artefacts.
+    pub fn read_browser_downloads(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("browser_downloads")
+    }
+
+    /// Read Windows artefacts.
+    pub fn read_windows_artefacts(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("windows_artefacts")
+    }
+
+    /// Read entropy regions.
+    pub fn read_entropy_regions(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("entropy_regions")
+    }
+
     /// Read string artefacts from Parquet
     fn read_string_artefacts_parquet(&self) -> Result<Vec<StringArtefact>> {
         let parquet_dir = self.run_path.join("parquet");
+        let unified_artefacts = self
+            .read_parquet_records_for_stem("string_artefacts")?
+            .into_iter()
+            .map(|record| string_artefact_from_record(record, None))
+            .collect::<Result<Vec<_>>>()?;
+        if !unified_artefacts.is_empty() {
+            return Ok(unified_artefacts);
+        }
+
         let mut all_artefacts = Vec::new();
 
         // Read URLs
@@ -316,10 +356,18 @@ impl MetadataReader {
                     parquet_u64_field(&batch, &["global_start", "offset"], i)?.unwrap_or(0);
                 let end = parquet_u64_field(&batch, &["global_end", "end"], i)?.unwrap_or(0);
                 let artefact = StringArtefact {
-                    artefact_type: "url".to_string(),
-                    value: url_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
-                    offset,
+                    artefact_kind: "url".to_string(),
+                    content: url_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    global_start: offset,
+                    global_end: Some(end),
                     length: parquet_span_length("URL", i, offset, end)?,
+                    encoding: parquet_string_field(&batch, &["encoding", "source_encoding"], i)?,
+                    source: parquet_string_field(
+                        &batch,
+                        &["source", "source_path", "source_file"],
+                        i,
+                    )?,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
                 };
                 artefacts.push(artefact);
             }
@@ -346,12 +394,20 @@ impl MetadataReader {
                     parquet_u64_field(&batch, &["global_start", "offset"], i)?.unwrap_or(0);
                 let end = parquet_u64_field(&batch, &["global_end", "end"], i)?.unwrap_or(0);
                 let artefact = StringArtefact {
-                    artefact_type: "email".to_string(),
-                    value: email_col
+                    artefact_kind: "email".to_string(),
+                    content: email_col
                         .map(|c| c.value(i).to_string())
                         .unwrap_or_default(),
-                    offset,
+                    global_start: offset,
+                    global_end: Some(end),
                     length: parquet_span_length("email", i, offset, end)?,
+                    encoding: parquet_string_field(&batch, &["encoding", "source_encoding"], i)?,
+                    source: parquet_string_field(
+                        &batch,
+                        &["source", "source_path", "source_file"],
+                        i,
+                    )?,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
                 };
                 artefacts.push(artefact);
             }
@@ -380,12 +436,20 @@ impl MetadataReader {
                     parquet_u64_field(&batch, &["global_start", "offset"], i)?.unwrap_or(0);
                 let end = parquet_u64_field(&batch, &["global_end", "end"], i)?.unwrap_or(0);
                 let artefact = StringArtefact {
-                    artefact_type: "phone".to_string(),
-                    value: phone_col
+                    artefact_kind: "phone".to_string(),
+                    content: phone_col
                         .map(|c| c.value(i).to_string())
                         .unwrap_or_default(),
-                    offset,
+                    global_start: offset,
+                    global_end: Some(end),
                     length: parquet_span_length("phone", i, offset, end)?,
+                    encoding: parquet_string_field(&batch, &["encoding", "source_encoding"], i)?,
+                    source: parquet_string_field(
+                        &batch,
+                        &["source", "source_path", "source_file"],
+                        i,
+                    )?,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
                 };
                 artefacts.push(artefact);
             }
@@ -420,12 +484,20 @@ impl MetadataReader {
 
             for i in 0..batch.num_rows() {
                 let artefact = StringArtefact {
-                    artefact_type: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
-                    value: value_col
+                    artefact_kind: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    content: value_col
                         .map(|c| c.value(i).to_string())
                         .unwrap_or_default(),
-                    offset: offset_col.map(|c| c.value(i)).unwrap_or(0),
+                    global_start: offset_col.map(|c| c.value(i)).unwrap_or(0),
+                    global_end: None,
                     length: length_col.map(|c| c.value(i)).unwrap_or(0),
+                    encoding: parquet_string_field(&batch, &["encoding", "source_encoding"], i)?,
+                    source: parquet_string_field(
+                        &batch,
+                        &["source", "source_path", "source_file"],
+                        i,
+                    )?,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
                 };
                 artefacts.push(artefact);
             }
@@ -477,8 +549,16 @@ impl MetadataReader {
     /// Read string artefacts from CSV
     fn read_string_artefacts_csv(&self) -> Result<Vec<StringArtefact>> {
         let metadata_dir = self.run_path.join("metadata");
-        let mut all_artefacts = Vec::new();
+        let unified_artefacts = self
+            .read_csv_records(&metadata_dir.join("string_artefacts.csv"))?
+            .into_iter()
+            .map(|record| string_artefact_from_record(record, None))
+            .collect::<Result<Vec<_>>>()?;
+        if !unified_artefacts.is_empty() {
+            return Ok(unified_artefacts);
+        }
 
+        let mut all_artefacts = Vec::new();
         all_artefacts.extend(self.read_named_csv_artefacts(
             &metadata_dir.join("artefacts_urls.csv"),
             "url",
@@ -559,14 +639,156 @@ impl MetadataReader {
                 .unwrap_or_else(|| csv_string_field(&headers, &record, &["artefact_type", "type"]));
 
             artefacts.push(StringArtefact {
-                artefact_type,
-                value: csv_string_field(&headers, &record, value_columns),
-                offset,
+                artefact_kind: artefact_type,
+                content: csv_string_field(&headers, &record, value_columns),
+                global_start: offset,
+                global_end: end,
                 length,
+                encoding: csv_optional_string_field(&headers, &record, &["encoding"]),
+                source: csv_optional_string_field(
+                    &headers,
+                    &record,
+                    &["source", "source_path", "source_file"],
+                ),
+                run_id: csv_optional_string_field(&headers, &record, &["run_id"]),
             });
         }
 
         Ok(artefacts)
+    }
+
+    fn read_table_records(&self, stem: &str) -> Result<Vec<MetadataRecord>> {
+        match self.backend.as_str() {
+            "parquet" => self.read_parquet_records_for_stem(stem),
+            "jsonl" => self
+                .read_jsonl_records(&self.run_path.join("metadata").join(format!("{stem}.jsonl"))),
+            "csv" => {
+                self.read_csv_records(&self.run_path.join("metadata").join(format!("{stem}.csv")))
+            }
+            _ => bail!("Unknown metadata backend: {}", self.backend),
+        }
+    }
+
+    fn read_parquet_records_for_stem(&self, stem: &str) -> Result<Vec<MetadataRecord>> {
+        let parquet_dir = self.run_path.join("parquet");
+        if !parquet_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(&parquet_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map(|e| e == "parquet").unwrap_or(false)
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| {
+                        name == format!("{stem}.parquet")
+                            || name
+                                .strip_prefix(stem)
+                                .and_then(|suffix| suffix.strip_prefix('_'))
+                                .map(|_| true)
+                                .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+
+        let mut records = Vec::new();
+        for path in paths {
+            records.extend(self.read_parquet_records(&path)?);
+        }
+        Ok(records)
+    }
+
+    fn read_parquet_records(&self, path: &Path) -> Result<Vec<MetadataRecord>> {
+        let file = File::open(path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+        let mut records = Vec::new();
+
+        for batch_result in reader {
+            let batch = batch_result?;
+            let schema = batch.schema();
+
+            for row_index in 0..batch.num_rows() {
+                let mut fields = BTreeMap::new();
+                for (column_index, field) in schema.fields().iter().enumerate() {
+                    if let Some(value) =
+                        parquet_scalar_to_string(batch.column(column_index).as_ref(), row_index)?
+                    {
+                        fields.insert(field.name().clone(), value);
+                    }
+                }
+                records.push(MetadataRecord::new(fields));
+            }
+        }
+
+        Ok(records)
+    }
+
+    fn read_jsonl_records(&self, path: &Path) -> Result<Vec<MetadataRecord>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut records = Vec::new();
+
+        for (line_index, line) in reader.lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(&line).with_context(|| {
+                format!(
+                    "Failed to parse {} line {}",
+                    metadata_file_name(path),
+                    line_index + 1
+                )
+            })?;
+            records.push(metadata_record_from_json(value).with_context(|| {
+                format!(
+                    "Failed to read {} line {} as an object",
+                    metadata_file_name(path),
+                    line_index + 1
+                )
+            })?);
+        }
+
+        Ok(records)
+    }
+
+    fn read_csv_records(&self, path: &Path) -> Result<Vec<MetadataRecord>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut reader =
+            csv::Reader::from_path(path).with_context(|| "Failed to open CSV artefact metadata")?;
+        let headers = reader
+            .headers()
+            .with_context(|| "Failed to read CSV artefact headers")?
+            .clone();
+        let mut records = Vec::new();
+
+        for (row_index, record) in reader.records().enumerate() {
+            let record = record
+                .with_context(|| format!("Failed to read CSV artefact row {}", row_index + 1))?;
+            let mut fields = BTreeMap::new();
+            for (index, header) in headers.iter().enumerate() {
+                if let Some(value) = record.get(index).filter(|value| !value.is_empty()) {
+                    fields.insert(header.to_string(), value.to_string());
+                }
+            }
+            records.push(MetadataRecord::new(fields));
+        }
+
+        Ok(records)
     }
 }
 
@@ -666,6 +888,12 @@ struct JsonStringArtefactRow {
     global_end: Option<u64>,
     #[serde(default)]
     length: Option<u64>,
+    #[serde(default)]
+    encoding: Option<String>,
+    #[serde(default, alias = "source_path", alias = "source_file")]
+    source: Option<String>,
+    #[serde(default)]
+    run_id: Option<String>,
 }
 
 impl JsonStringArtefactRow {
@@ -689,12 +917,146 @@ impl JsonStringArtefactRow {
         };
 
         Ok(StringArtefact {
-            artefact_type: self.artefact_type,
-            value: self.value,
-            offset: self.offset,
+            artefact_kind: self.artefact_type,
+            content: self.value,
+            global_start: self.offset,
+            global_end: self.global_end,
             length,
+            encoding: self.encoding,
+            source: self.source,
+            run_id: self.run_id,
         })
     }
+}
+
+fn string_artefact_from_record(
+    record: MetadataRecord,
+    fixed_kind: Option<&str>,
+) -> Result<StringArtefact> {
+    let artefact_kind = fixed_kind
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            record
+                .get(&["artefact_kind", "artefact_type", "type"])
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_default();
+    let content = record
+        .get(&[
+            "content",
+            "value",
+            "url",
+            "email",
+            "phone",
+            "phone_raw",
+            "number",
+            "string",
+        ])
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let global_start = record
+        .get_u64(&["global_start", "offset", "start"])
+        .unwrap_or(0);
+    let global_end = record.get_u64(&["global_end", "end"]);
+    let length = match record.get_u64(&["length"]) {
+        Some(length) => length,
+        None => match global_end {
+            Some(end) => end
+                .checked_sub(global_start)
+                .context("String artefact global_end precedes global_start")?,
+            None => 0,
+        },
+    };
+
+    Ok(StringArtefact {
+        artefact_kind,
+        content,
+        global_start,
+        global_end,
+        length,
+        encoding: record
+            .get(&["encoding", "source_encoding"])
+            .map(ToOwned::to_owned),
+        source: record
+            .get(&["source", "source_path", "source_file"])
+            .map(ToOwned::to_owned),
+        run_id: record.get(&["run_id"]).map(ToOwned::to_owned),
+    })
+}
+
+fn metadata_record_from_json(value: serde_json::Value) -> Result<MetadataRecord> {
+    let serde_json::Value::Object(object) = value else {
+        bail!("metadata row is not an object");
+    };
+
+    let fields = object
+        .into_iter()
+        .filter_map(|(key, value)| json_value_to_string(value).map(|value| (key, value)))
+        .collect();
+
+    Ok(MetadataRecord::new(fields))
+}
+
+fn json_value_to_string(value: serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) => Some(value),
+        other @ (serde_json::Value::Array(_) | serde_json::Value::Object(_)) => {
+            Some(other.to_string())
+        }
+    }
+}
+
+fn parquet_scalar_to_string(array: &dyn Array, row_index: usize) -> Result<Option<String>> {
+    if array.is_null(row_index) {
+        return Ok(None);
+    }
+    if let Some(array) = array.as_any().downcast_ref::<StringArray>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<BooleanArray>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<UInt64Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<UInt32Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<UInt16Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<UInt8Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Int64Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Int32Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Int16Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Int8Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Float64Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Float32Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+
+    bail!(
+        "Parquet column type {:?} is not supported for artefact display",
+        array.data_type()
+    )
 }
 
 fn parquet_string_field(
@@ -970,6 +1332,79 @@ mod tests {
         writer.finish().unwrap();
     }
 
+    fn write_v051_artefact_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("artefact_kind", DataType::Utf8, false),
+            Field::new("content", DataType::Utf8, false),
+            Field::new("global_start", DataType::Int64, false),
+            Field::new("global_end", DataType::Int64, false),
+            Field::new("encoding", DataType::Utf8, true),
+            Field::new("source", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["url"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["https://example.test"])),
+                Arc::new(Int64Array::from(vec![10])),
+                Arc::new(Int64Array::from(vec![30])),
+                Arc::new(StringArray::from(vec![Some("utf8")])),
+                Arc::new(StringArray::from(vec![Some("chunk-1")])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
+
+    fn write_legacy_url_artefact_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("url", DataType::Utf8, false),
+            Field::new("global_start", DataType::Int64, false),
+            Field::new("global_end", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["https://example.test"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![10])),
+                Arc::new(Int64Array::from(vec![30])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
+
+    fn write_v051_run_summary_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bytes_scanned", DataType::Int64, false),
+            Field::new("chunks_processed", DataType::Int64, false),
+            Field::new("hits", DataType::Int64, false),
+            Field::new("files_carved", DataType::Int64, false),
+            Field::new("artefacts_extracted", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![4096])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![2])),
+                Arc::new(Int64Array::from(vec![3])),
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Int64Array::from(vec![5])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
+
     #[test]
     fn test_reader_requires_metadata() {
         let temp = TempDir::new().unwrap();
@@ -1066,6 +1501,74 @@ mod tests {
     }
 
     #[test]
+    fn test_reader_jsonl_v051_artefact_outputs() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.jsonl"),
+            r#"{"file_type":"jpeg","path":"1.jpg","global_start":0,"size":10}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("run_summary.jsonl"),
+            r#"{"bytes_scanned":4096,"chunks_processed":2,"hits":3,"files_carved":1,"rejected":4,"prevalidation_rejected":5,"overlap_skipped":6,"string_spans":7,"artefacts_extracted":8,"duplicates_found":9,"duplicates_skipped":10}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("string_artefacts.jsonl"),
+            r#"{"artefact_kind":"email","content":"a@example.test","global_start":20,"global_end":34,"encoding":"utf8","source":"chunk-1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("browser_history.jsonl"),
+            r#"{"url":"https://example.test","title":"Example","visit_count":2}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("windows_artefacts.jsonl"),
+            r#"{"artefact_kind":"lnk","path":"Users/Public/file.lnk","target_path":"C:/target"}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("entropy_regions.jsonl"),
+            r#"{"global_start":100,"global_end":200,"entropy":7.9}"#,
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let summary = reader.read_run_summary().unwrap().unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+        let history = reader.read_browser_history().unwrap();
+        let cookies = reader.read_browser_cookies().unwrap();
+        let windows = reader.read_windows_artefacts().unwrap();
+        let entropy = reader.read_entropy_regions().unwrap();
+
+        assert_eq!(summary.bytes_scanned, Some(4096));
+        assert_eq!(summary.prevalidation_rejected, Some(5));
+        assert_eq!(summary.duplicates_skipped, Some(10));
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "email");
+        assert_eq!(strings[0].content, "a@example.test");
+        assert_eq!(strings[0].global_start, 20);
+        assert_eq!(strings[0].global_end, Some(34));
+        assert_eq!(strings[0].length, 14);
+        assert_eq!(
+            history[0].fields.get("url").map(String::as_str),
+            Some("https://example.test")
+        );
+        assert!(cookies.is_empty());
+        assert_eq!(
+            windows[0].fields.get("target_path").map(String::as_str),
+            Some("C:/target")
+        );
+        assert_eq!(
+            entropy[0].fields.get("entropy").map(String::as_str),
+            Some("7.9")
+        );
+    }
+
+    #[test]
     fn test_reader_parquet_v051_with_data() {
         let temp = TempDir::new().unwrap();
         let parquet_dir = temp.path().join("parquet");
@@ -1099,6 +1602,56 @@ mod tests {
         assert_eq!(files[1].errors, vec!["truncated footer"]);
         assert!(files[1].is_duplicate);
         assert_eq!(files[1].duplicate_of_offset, Some(1024));
+    }
+
+    #[test]
+    fn test_reader_parquet_v051_artefact_outputs() {
+        let temp = TempDir::new().unwrap();
+        let parquet_dir = temp.path().join("parquet");
+        fs::create_dir(&parquet_dir).unwrap();
+        write_v051_files_parquet(&parquet_dir.join("files_jpeg.parquet"));
+        write_v051_artefact_parquet(&parquet_dir.join("string_artefacts.parquet"));
+        write_v051_run_summary_parquet(&parquet_dir.join("run_summary.parquet"));
+        write_v051_artefact_parquet(&parquet_dir.join("browser_history.parquet"));
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let summary = reader.read_run_summary().unwrap().unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+        let history = reader.read_browser_history().unwrap();
+        let entropy = reader.read_entropy_regions().unwrap();
+
+        assert_eq!(summary.bytes_scanned, Some(4096));
+        assert_eq!(summary.chunks_processed, Some(2));
+        assert_eq!(summary.artefacts_extracted, Some(5));
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "url");
+        assert_eq!(strings[0].content, "https://example.test");
+        assert_eq!(strings[0].global_start, 10);
+        assert_eq!(strings[0].global_end, Some(30));
+        assert_eq!(strings[0].encoding.as_deref(), Some("utf8"));
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].fields.get("content").map(String::as_str),
+            Some("https://example.test")
+        );
+        assert!(entropy.is_empty());
+    }
+
+    #[test]
+    fn test_reader_parquet_string_artefacts_prefers_unified_output() {
+        let temp = TempDir::new().unwrap();
+        let parquet_dir = temp.path().join("parquet");
+        fs::create_dir(&parquet_dir).unwrap();
+        write_v051_files_parquet(&parquet_dir.join("files_jpeg.parquet"));
+        write_v051_artefact_parquet(&parquet_dir.join("string_artefacts.parquet"));
+        write_legacy_url_artefact_parquet(&parquet_dir.join("artefacts_urls.parquet"));
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "url");
+        assert_eq!(strings[0].content, "https://example.test");
     }
 
     #[test]
@@ -1218,14 +1771,88 @@ mod tests {
         let artefacts = reader.read_string_artefacts().unwrap();
 
         assert_eq!(artefacts.len(), 2);
-        assert_eq!(artefacts[0].artefact_type, "url");
-        assert_eq!(artefacts[0].value, "https://example.test");
-        assert_eq!(artefacts[0].offset, 10);
+        assert_eq!(artefacts[0].artefact_kind, "url");
+        assert_eq!(artefacts[0].content, "https://example.test");
+        assert_eq!(artefacts[0].global_start, 10);
         assert_eq!(artefacts[0].length, 20);
-        assert_eq!(artefacts[1].artefact_type, "string");
-        assert_eq!(artefacts[1].value, "hello");
-        assert_eq!(artefacts[1].offset, 40);
+        assert_eq!(artefacts[1].artefact_kind, "string");
+        assert_eq!(artefacts[1].content, "hello");
+        assert_eq!(artefacts[1].global_start, 40);
         assert_eq!(artefacts[1].length, 5);
+    }
+
+    #[test]
+    fn test_reader_csv_v051_artefact_outputs() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("run_summary.csv"),
+            "bytes_scanned,chunks_processed,hits,files_carved\n4096,2,3,1\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("string_artefacts.csv"),
+            "artefact_kind,content,global_start,global_end,encoding,source\nurl,https://example.test,10,30,utf8,chunk-1\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("browser_downloads.csv"),
+            "url,target_path,start_time\nhttps://example.test/file,/tmp/file,2026-01-01\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let summary = reader.read_run_summary().unwrap().unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+        let downloads = reader.read_browser_downloads().unwrap();
+        let windows = reader.read_windows_artefacts().unwrap();
+
+        assert_eq!(summary.bytes_scanned, Some(4096));
+        assert_eq!(summary.files_carved, Some(1));
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "url");
+        assert_eq!(strings[0].content, "https://example.test");
+        assert_eq!(strings[0].length, 20);
+        assert_eq!(
+            downloads[0].fields.get("target_path").map(String::as_str),
+            Some("/tmp/file")
+        );
+        assert!(windows.is_empty());
+    }
+
+    #[test]
+    fn test_reader_csv_string_artefacts_prefers_unified_output() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("string_artefacts.csv"),
+            "artefact_kind,content,global_start,global_end\nurl,https://example.test,10,30\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("artefacts_urls.csv"),
+            "url,global_start,global_end\nhttps://example.test,10,30\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "url");
+        assert_eq!(strings[0].content, "https://example.test");
     }
 
     #[test]

@@ -2,7 +2,9 @@
 
 use egui::{Color32, RichText, Ui};
 
-use crate::metadata::{CarvedFile, MetadataReader, MetadataSummary, StringArtefact};
+use crate::metadata::{
+    CarvedFile, MetadataReader, MetadataRecord, MetadataSummary, RunSummary, StringArtefact,
+};
 use crate::scan::format_bytes;
 
 /// Results browser panel
@@ -13,10 +15,24 @@ pub struct ResultsPanel {
     reader: Option<MetadataReader>,
     /// Cached summary
     summary: Option<MetadataSummary>,
+    /// Cached SwiftBeaver run summary
+    run_summary: Option<RunSummary>,
+    /// Whether the run summary has been loaded or attempted.
+    run_summary_loaded: bool,
     /// Cached files
     files: Vec<CarvedFile>,
     /// Cached string artefacts
     strings: Vec<StringArtefact>,
+    /// Cached browser history artefacts
+    browser_history: Option<Vec<MetadataRecord>>,
+    /// Cached browser cookie artefacts
+    browser_cookies: Option<Vec<MetadataRecord>>,
+    /// Cached browser download artefacts
+    browser_downloads: Option<Vec<MetadataRecord>>,
+    /// Cached Windows artefacts
+    windows_artefacts: Option<Vec<MetadataRecord>>,
+    /// Cached entropy regions
+    entropy_regions: Option<Vec<MetadataRecord>>,
     /// Current tab
     current_tab: ResultsTab,
     /// File type filter
@@ -25,8 +41,8 @@ pub struct ResultsPanel {
     search_query: String,
     /// Selected file index
     selected_file: Option<usize>,
-    /// Error message
-    error: Option<String>,
+    /// Error messages
+    errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,6 +51,11 @@ enum ResultsTab {
     Overview,
     Files,
     Strings,
+    BrowserHistory,
+    BrowserCookies,
+    BrowserDownloads,
+    WindowsArtefacts,
+    EntropyRegions,
 }
 
 impl Default for ResultsPanel {
@@ -49,13 +70,20 @@ impl ResultsPanel {
             run_path: None,
             reader: None,
             summary: None,
+            run_summary: None,
+            run_summary_loaded: false,
             files: Vec::new(),
             strings: Vec::new(),
+            browser_history: None,
+            browser_cookies: None,
+            browser_downloads: None,
+            windows_artefacts: None,
+            entropy_regions: None,
             current_tab: ResultsTab::Overview,
             type_filter: None,
             search_query: String::new(),
             selected_file: None,
-            error: None,
+            errors: Vec::new(),
         }
     }
 
@@ -69,7 +97,7 @@ impl ResultsPanel {
                 let files = match reader.read_carved_files() {
                     Ok(files) => files,
                     Err(e) => {
-                        self.error = Some(format_load_error("Failed to load files", &e));
+                        self.push_error("Failed to load files", &e);
                         return;
                     }
                 };
@@ -77,7 +105,7 @@ impl ResultsPanel {
                 let strings = match reader.read_string_artefacts() {
                     Ok(strings) => strings,
                     Err(e) => {
-                        self.error = Some(format_load_error("Failed to load string artefacts", &e));
+                        self.push_error("Failed to load string artefacts", &e);
                         Vec::new()
                     }
                 };
@@ -85,7 +113,7 @@ impl ResultsPanel {
                 let summary = match MetadataSummary::from_results(&files, &strings) {
                     Ok(summary) => summary,
                     Err(e) => {
-                        self.error = Some(format_load_error("Failed to summarize results", &e));
+                        self.push_error("Failed to summarize results", &e);
                         return;
                     }
                 };
@@ -96,7 +124,7 @@ impl ResultsPanel {
                 self.reader = Some(reader);
             }
             Err(e) => {
-                self.error = Some(format_load_error("Failed to open results", &e));
+                self.push_error("Failed to open results", &e);
             }
         }
     }
@@ -111,12 +139,107 @@ impl ResultsPanel {
     fn clear_loaded_state(&mut self) {
         self.reader = None;
         self.summary = None;
+        self.run_summary = None;
+        self.run_summary_loaded = false;
         self.files.clear();
         self.strings.clear();
+        self.browser_history = None;
+        self.browser_cookies = None;
+        self.browser_downloads = None;
+        self.windows_artefacts = None;
+        self.entropy_regions = None;
         self.type_filter = None;
         self.search_query.clear();
         self.selected_file = None;
-        self.error = None;
+        self.errors.clear();
+    }
+
+    fn push_error(&mut self, context: &str, error: &anyhow::Error) {
+        self.errors.push(format_load_error(context, error));
+    }
+
+    fn ensure_run_summary_loaded(&mut self) {
+        if self.run_summary_loaded {
+            return;
+        }
+        self.run_summary_loaded = true;
+        let result = self
+            .reader
+            .as_ref()
+            .map(MetadataReader::read_run_summary)
+            .transpose();
+        match result {
+            Ok(summary) => self.run_summary = summary.flatten(),
+            Err(e) => self.push_error("Failed to load run summary", &e),
+        }
+    }
+
+    fn ensure_browser_history_loaded(&mut self) {
+        if self.browser_history.is_none() {
+            self.browser_history = Some(
+                self.load_records("Failed to load browser history", |reader| {
+                    reader.read_browser_history()
+                }),
+            );
+        }
+    }
+
+    fn ensure_browser_cookies_loaded(&mut self) {
+        if self.browser_cookies.is_none() {
+            self.browser_cookies = Some(
+                self.load_records("Failed to load browser cookies", |reader| {
+                    reader.read_browser_cookies()
+                }),
+            );
+        }
+    }
+
+    fn ensure_browser_downloads_loaded(&mut self) {
+        if self.browser_downloads.is_none() {
+            self.browser_downloads = Some(
+                self.load_records("Failed to load browser downloads", |reader| {
+                    reader.read_browser_downloads()
+                }),
+            );
+        }
+    }
+
+    fn ensure_windows_artefacts_loaded(&mut self) {
+        if self.windows_artefacts.is_none() {
+            self.windows_artefacts = Some(
+                self.load_records("Failed to load Windows artefacts", |reader| {
+                    reader.read_windows_artefacts()
+                }),
+            );
+        }
+    }
+
+    fn ensure_entropy_regions_loaded(&mut self) {
+        if self.entropy_regions.is_none() {
+            self.entropy_regions = Some(
+                self.load_records("Failed to load entropy regions", |reader| {
+                    reader.read_entropy_regions()
+                }),
+            );
+        }
+    }
+
+    fn load_records(
+        &mut self,
+        context: &str,
+        load: impl FnOnce(&MetadataReader) -> anyhow::Result<Vec<MetadataRecord>>,
+    ) -> Vec<MetadataRecord> {
+        let Some(reader) = self.reader.as_ref() else {
+            return Vec::new();
+        };
+
+        match load(reader) {
+            Ok(records) => records,
+            Err(e) => {
+                self.push_error(context, &e);
+                Vec::new()
+            }
+        }
     }
 
     /// Render the results panel
@@ -131,8 +254,8 @@ impl ResultsPanel {
             }
         }
 
-        // Show error if any
-        if let Some(error) = &self.error {
+        // Show errors if any
+        for error in &self.errors {
             ui.colored_label(Color32::RED, format!("Error: {}", error));
             ui.add_space(10.0);
         }
@@ -153,6 +276,7 @@ impl ResultsPanel {
         }
 
         // Tab bar
+        let previous_tab = self.current_tab;
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.current_tab, ResultsTab::Overview, "Overview");
             ui.selectable_value(
@@ -165,7 +289,36 @@ impl ResultsPanel {
                 ResultsTab::Strings,
                 format!("Strings ({})", self.strings.len()),
             );
+            ui.selectable_value(
+                &mut self.current_tab,
+                ResultsTab::BrowserHistory,
+                tab_label("History", self.browser_history.as_ref()),
+            );
+            ui.selectable_value(
+                &mut self.current_tab,
+                ResultsTab::BrowserCookies,
+                tab_label("Cookies", self.browser_cookies.as_ref()),
+            );
+            ui.selectable_value(
+                &mut self.current_tab,
+                ResultsTab::BrowserDownloads,
+                tab_label("Downloads", self.browser_downloads.as_ref()),
+            );
+            ui.selectable_value(
+                &mut self.current_tab,
+                ResultsTab::WindowsArtefacts,
+                tab_label("Windows", self.windows_artefacts.as_ref()),
+            );
+            ui.selectable_value(
+                &mut self.current_tab,
+                ResultsTab::EntropyRegions,
+                tab_label("Entropy", self.entropy_regions.as_ref()),
+            );
         });
+        if self.current_tab != previous_tab {
+            self.search_query.clear();
+            self.type_filter = None;
+        }
 
         ui.separator();
 
@@ -173,11 +326,175 @@ impl ResultsPanel {
             ResultsTab::Overview => self.show_overview(ui),
             ResultsTab::Files => self.show_files(ui),
             ResultsTab::Strings => self.show_strings(ui),
+            ResultsTab::BrowserHistory => self.show_browser_history(ui),
+            ResultsTab::BrowserCookies => self.show_browser_cookies(ui),
+            ResultsTab::BrowserDownloads => self.show_browser_downloads(ui),
+            ResultsTab::WindowsArtefacts => self.show_windows_artefacts(ui),
+            ResultsTab::EntropyRegions => self.show_entropy_regions(ui),
         }
     }
 
+    fn show_browser_history(&mut self, ui: &mut Ui) {
+        self.ensure_browser_history_loaded();
+        show_records_table(
+            ui,
+            &mut self.search_query,
+            self.browser_history.as_deref().unwrap_or(&[]),
+            "No browser history artefacts found.",
+            "browser_history_grid",
+            &[
+                "url",
+                "title",
+                "visit_time",
+                "last_visit_time",
+                "visit_count",
+                "source",
+            ],
+        );
+    }
+
+    fn show_browser_cookies(&mut self, ui: &mut Ui) {
+        self.ensure_browser_cookies_loaded();
+        show_records_table(
+            ui,
+            &mut self.search_query,
+            self.browser_cookies.as_deref().unwrap_or(&[]),
+            "No browser cookie artefacts found.",
+            "browser_cookies_grid",
+            &[
+                "host", "domain", "name", "value", "path", "expires", "source",
+            ],
+        );
+    }
+
+    fn show_browser_downloads(&mut self, ui: &mut Ui) {
+        self.ensure_browser_downloads_loaded();
+        show_records_table(
+            ui,
+            &mut self.search_query,
+            self.browser_downloads.as_deref().unwrap_or(&[]),
+            "No browser download artefacts found.",
+            "browser_downloads_grid",
+            &[
+                "url",
+                "target_path",
+                "path",
+                "start_time",
+                "end_time",
+                "source",
+            ],
+        );
+    }
+
+    fn show_windows_artefacts(&mut self, ui: &mut Ui) {
+        self.ensure_windows_artefacts_loaded();
+        show_records_table(
+            ui,
+            &mut self.search_query,
+            self.windows_artefacts.as_deref().unwrap_or(&[]),
+            "No Windows artefacts found.",
+            "windows_artefacts_grid",
+            &[
+                "artefact_kind",
+                "path",
+                "target_path",
+                "timestamp",
+                "source",
+            ],
+        );
+    }
+
+    fn show_entropy_regions(&mut self, ui: &mut Ui) {
+        self.ensure_entropy_regions_loaded();
+        show_records_table(
+            ui,
+            &mut self.search_query,
+            self.entropy_regions.as_deref().unwrap_or(&[]),
+            "No entropy regions found. Enable entropy scanning in configuration.",
+            "entropy_regions_grid",
+            &["global_start", "global_end", "length", "entropy", "source"],
+        );
+    }
+
     fn show_overview(&mut self, ui: &mut Ui) {
+        self.ensure_run_summary_loaded();
+
         if let Some(summary) = &self.summary {
+            if let Some(run_summary) = &self.run_summary {
+                ui.group(|ui| {
+                    ui.label(RichText::new("Run Summary").strong());
+
+                    egui::Grid::new("run_summary_grid")
+                        .num_columns(2)
+                        .spacing([40.0, 5.0])
+                        .show(ui, |ui| {
+                            summary_metric_row(
+                                ui,
+                                "Bytes Scanned:",
+                                run_summary.bytes_scanned.map(format_bytes),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "Chunks Processed:",
+                                run_summary.chunks_processed.map(|value| value.to_string()),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "Hits:",
+                                run_summary.hits.map(|value| value.to_string()),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "Files Carved:",
+                                run_summary.files_carved.map(|value| value.to_string()),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "Rejected:",
+                                run_summary.rejected.map(|value| value.to_string()),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "Prevalidation Rejected:",
+                                run_summary
+                                    .prevalidation_rejected
+                                    .map(|value| value.to_string()),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "Overlap Skipped:",
+                                run_summary.overlap_skipped.map(|value| value.to_string()),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "String Spans:",
+                                run_summary.string_spans.map(|value| value.to_string()),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "Artefacts Extracted:",
+                                run_summary
+                                    .artefacts_extracted
+                                    .map(|value| value.to_string()),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "Duplicates Found:",
+                                run_summary.duplicates_found.map(|value| value.to_string()),
+                            );
+                            summary_metric_row(
+                                ui,
+                                "Duplicates Skipped:",
+                                run_summary
+                                    .duplicates_skipped
+                                    .map(|value| value.to_string()),
+                            );
+                        });
+                });
+
+                ui.add_space(10.0);
+            }
+
             ui.group(|ui| {
                 ui.label(RichText::new("Summary").strong());
 
@@ -465,7 +782,7 @@ impl ResultsPanel {
             .filter(|s| {
                 if !self.search_query.is_empty() {
                     return s
-                        .value
+                        .content
                         .to_lowercase()
                         .contains(&self.search_query.to_lowercase());
                 }
@@ -483,24 +800,40 @@ impl ResultsPanel {
             .max_height(400.0)
             .show(ui, |ui| {
                 egui::Grid::new("strings_grid")
-                    .num_columns(4)
+                    .num_columns(7)
                     .striped(true)
                     .spacing([10.0, 5.0])
                     .show(ui, |ui| {
                         // Header
-                        ui.label(RichText::new("Type").strong());
-                        ui.label(RichText::new("Offset").strong());
+                        ui.label(RichText::new("Artefact Kind").strong());
+                        ui.label(RichText::new("Global Start").strong());
+                        ui.label(RichText::new("Global End").strong());
                         ui.label(RichText::new("Length").strong());
-                        ui.label(RichText::new("Value").strong());
+                        ui.label(RichText::new("Encoding").strong());
+                        ui.label(RichText::new("Source").strong());
+                        ui.label(RichText::new("Content").strong());
                         ui.end_row();
 
                         // Strings
                         for artefact in filtered.iter().take(500) {
-                            ui.label(&artefact.artefact_type);
-                            ui.label(format!("0x{:X}", artefact.offset));
+                            ui.label(&artefact.artefact_kind);
+                            ui.label(format!("0x{:X}", artefact.global_start));
+                            ui.label(
+                                artefact
+                                    .global_end
+                                    .map(|end| format!("0x{end:X}"))
+                                    .unwrap_or_default(),
+                            );
                             ui.label(format!("{}", artefact.length));
-
-                            ui.label(truncate_chars(&artefact.value, 80));
+                            ui.label(artefact.encoding.as_deref().unwrap_or(""));
+                            ui.label(
+                                artefact
+                                    .source
+                                    .as_deref()
+                                    .map(|source| truncate_chars(source, 40))
+                                    .unwrap_or_default(),
+                            );
+                            ui.label(truncate_chars(&artefact.content, 80));
                             ui.end_row();
                         }
 
@@ -521,6 +854,138 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         truncated.push_str("...");
     }
     truncated
+}
+
+fn summary_metric_row(ui: &mut Ui, label: &str, value: Option<String>) {
+    ui.label(label);
+    ui.label(RichText::new(value.unwrap_or_else(|| "Not reported".to_string())).strong());
+    ui.end_row();
+}
+
+fn tab_label(label: &str, records: Option<&Vec<MetadataRecord>>) -> String {
+    records
+        .map(|records| format!("{label} ({})", records.len()))
+        .unwrap_or_else(|| label.to_string())
+}
+
+fn show_records_table(
+    ui: &mut Ui,
+    search_query: &mut String,
+    records: &[MetadataRecord],
+    empty_message: &str,
+    grid_id: &'static str,
+    preferred_columns: &[&str],
+) {
+    if records.is_empty() {
+        ui.label(empty_message);
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Filter:");
+        ui.text_edit_singleline(search_query);
+        if ui.button("Clear").clicked() {
+            search_query.clear();
+        }
+    });
+
+    ui.separator();
+
+    let query = search_query.to_lowercase();
+    let filtered: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            query.is_empty()
+                || record
+                    .fields
+                    .values()
+                    .any(|value| value.to_lowercase().contains(&query))
+        })
+        .collect();
+    let columns = record_columns(records, preferred_columns);
+
+    ui.label(format!(
+        "Showing {} of {} rows",
+        filtered.len(),
+        records.len()
+    ));
+
+    egui::ScrollArea::vertical()
+        .max_height(400.0)
+        .show(ui, |ui| {
+            egui::Grid::new(grid_id)
+                .num_columns(columns.len().max(1))
+                .striped(true)
+                .spacing([10.0, 5.0])
+                .show(ui, |ui| {
+                    for column in &columns {
+                        ui.label(RichText::new(column_label(column)).strong());
+                    }
+                    ui.end_row();
+
+                    for record in filtered.iter().take(500) {
+                        for column in &columns {
+                            let value = record
+                                .fields
+                                .get(column)
+                                .map(|value| truncate_chars(value, 80))
+                                .unwrap_or_default();
+                            ui.label(value);
+                        }
+                        ui.end_row();
+                    }
+
+                    if filtered.len() > 500 {
+                        ui.label("...");
+                        ui.label(format!("({} more rows)", filtered.len() - 500));
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+fn record_columns(records: &[MetadataRecord], preferred_columns: &[&str]) -> Vec<String> {
+    let mut columns = Vec::new();
+
+    for column in preferred_columns {
+        if records
+            .iter()
+            .any(|record| record.fields.contains_key(*column))
+        {
+            columns.push((*column).to_string());
+        }
+    }
+
+    for record in records.iter().take(100) {
+        for column in record.fields.keys() {
+            if !columns.iter().any(|existing| existing == column) {
+                columns.push(column.clone());
+            }
+            if columns.len() >= 10 {
+                return columns;
+            }
+        }
+    }
+
+    columns
+}
+
+fn column_label(column: &str) -> String {
+    column
+        .split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut label = first.to_uppercase().to_string();
+                    label.push_str(chars.as_str());
+                    label
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn format_error_list(errors: &[String]) -> String {

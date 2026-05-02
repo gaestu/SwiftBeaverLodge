@@ -14,7 +14,7 @@ A pure Rust desktop application for forensic file recovery using [egui](https://
 - 🔍 **Comprehensive file recovery** - Images, documents, archives, databases, media, and more
 - 🔗 **String/URL/Email extraction** - Find text patterns in evidence
 - 📊 **Real-time progress monitoring** - Live throughput, ETA, and statistics
-- 📁 **Result browsing** - Filter and search carved files from SwiftBeaver v0.5.1 Parquet metadata, with JSONL/CSV support, including hashes, validation, truncation, duplicate, and error fields
+- 📁 **Result browsing** - Filter and search carved files plus SwiftBeaver v0.5.1 run summaries, string artefacts, browser artefacts, Windows artefacts, and entropy regions from Parquet, JSONL, and CSV metadata
 - 💾 **Offline/Airgapped operation** - No network required for forensic integrity
 - 🚀 **GPU acceleration** - Optional OpenCL/CUDA support via the `--gpu` flag
 - 🎯 **Single binary** - No npm, no web stack, just `cargo build`
@@ -101,7 +101,7 @@ the `--gpu` flag.
 1. **Configure** - Select evidence source (file or raw device), output directory, and file types
 2. **Start Scan** - Click "▶ Start Scan" to begin carving
 3. **Monitor** - Watch real-time progress and logs
-4. **Browse Results** - View carved files and metadata
+4. **Browse Results** - View carved files, run metrics, and artefact metadata
 
 ### Raw Device Scanning
 

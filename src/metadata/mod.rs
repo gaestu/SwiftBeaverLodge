@@ -4,7 +4,7 @@ mod reader;
 mod types;
 
 pub use reader::MetadataReader;
-pub use types::{CarvedFile, MetadataSummary, StringArtefact};
+pub use types::{CarvedFile, MetadataRecord, MetadataSummary, RunSummary, StringArtefact};
 
 use std::path::Path;
 
