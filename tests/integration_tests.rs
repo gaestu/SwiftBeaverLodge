@@ -67,7 +67,7 @@ fn test_jsonl_metadata_roundtrip() {
         handler_id: Some("jpeg".to_string()),
         md5: Some("def456".to_string()),
         sha256: Some("abc123".to_string()),
-        validated: true,
+        validated: Some(true),
         truncated: false,
         errors: Vec::new(),
         pattern_id: Some("jpeg_soi".to_string()),

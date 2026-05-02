@@ -41,9 +41,9 @@ pub struct CarvedFile {
     /// SHA-256 hash of carved file
     #[serde(default)]
     pub sha256: Option<String>,
-    /// Whether the file appears valid
+    /// Validation result when SwiftBeaver performed post-carving validation.
     #[serde(default, alias = "is_valid")]
-    pub validated: bool,
+    pub validated: Option<bool>,
     /// Whether SwiftBeaver truncated the carve.
     #[serde(default)]
     pub truncated: bool,
@@ -199,7 +199,7 @@ mod tests {
         assert_eq!(file.global_start, 1024);
         assert_eq!(file.size, 4096);
         assert_eq!(file.path, "output/0001.jpg");
-        assert!(file.validated);
+        assert_eq!(file.validated, Some(true));
     }
 
     #[test]

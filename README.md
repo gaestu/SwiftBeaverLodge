@@ -157,6 +157,20 @@ SwiftBeaverLodge/
 | String Scanning | Extract URLs/emails/phones | enabled |
 | GPU Acceleration | Use GPU for faster scanning (`--gpu`) | disabled |
 | Evidence Hash | Compute SHA-256 of evidence | enabled |
+| Run Mode | Normal, dry-run, or metadata-only scanning | normal |
+| Validation | Validate carved files and optionally remove invalid files | disabled |
+| Hashing & Deduplication | Select `md5`/`sha256`, track duplicates, optionally skip duplicate file bodies | SwiftBeaver default hashes, dedupe disabled |
+
+### Scan modes, validation, and dedupe
+
+Advanced options expose SwiftBeaver v0.5.1's storage-management controls:
+
+- **Dry run** (`--dry-run`) scans and counts without writing SwiftBeaver output files.
+- **Metadata only** (`--metadata-only`) writes metadata records but skips carved file bodies; validation and invalid-file removal are disabled in this mode.
+- **Validate carved files** (`--validate-carved`) records validation state; **Remove invalid files** (`--remove-invalid`) is only available when validation is enabled and carved file bodies are being written.
+- **Hash algorithms** emits `--hash-algorithms` only when at least one algorithm is selected. Leaving the list empty lets SwiftBeaver use its default `md5,sha256` set.
+- **Track duplicates** (`--dedupe`) requires SHA-256 hashing. If explicit hashes are selected in the GUI, `sha256` is kept enabled for dedupe.
+- **Skip duplicate file bodies** (`--skip-duplicates`) is only available with dedupe when carved file bodies are being written; duplicate rows remain in metadata while duplicate file contents are not written again.
 
 ### Supported file type categories
 

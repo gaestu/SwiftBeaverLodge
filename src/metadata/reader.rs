@@ -104,6 +104,7 @@ impl MetadataReader {
                 )?
                 .unwrap_or_default();
                 let error = parquet_string_field(&batch, &["error", "errors"], i)?;
+                let validated = parquet_bool_field(&batch, &["validated", "is_valid"], i)?;
 
                 let file = CarvedFile {
                     id,
@@ -119,8 +120,7 @@ impl MetadataReader {
                     handler_id: parquet_string_field(&batch, &["handler_id"], i)?,
                     md5: parquet_string_field(&batch, &["md5"], i)?,
                     sha256: parquet_string_field(&batch, &["sha256", "sha256_hex"], i)?,
-                    validated: parquet_bool_field(&batch, &["validated", "is_valid"], i)?
-                        .unwrap_or(false),
+                    validated,
                     truncated: parquet_bool_field(&batch, &["truncated"], i)?.unwrap_or(false),
                     errors: error_values(error),
                     pattern_id: parquet_string_field(&batch, &["pattern_id"], i)?,
@@ -214,6 +214,8 @@ impl MetadataReader {
                 &["errors", "error"],
             ));
 
+            let validated = csv_bool_field(&headers, &record, &["validated", "is_valid"])?;
+
             let file = CarvedFile {
                 id,
                 run_id: csv_optional_string_field(&headers, &record, &["run_id"]),
@@ -226,8 +228,7 @@ impl MetadataReader {
                 handler_id: csv_optional_string_field(&headers, &record, &["handler_id"]),
                 md5: csv_optional_string_field(&headers, &record, &["md5"]),
                 sha256: csv_optional_string_field(&headers, &record, &["sha256", "sha256_hex"]),
-                validated: csv_bool_field(&headers, &record, &["validated", "is_valid"])?
-                    .unwrap_or(false),
+                validated,
                 truncated: csv_bool_field(&headers, &record, &["truncated"])?.unwrap_or(false),
                 errors,
                 pattern_id: csv_optional_string_field(&headers, &record, &["pattern_id"]),
@@ -640,7 +641,7 @@ impl JsonCarvedFileRow {
             handler_id: self.handler_id,
             md5: self.md5,
             sha256: self.sha256,
-            validated: self.validated.unwrap_or(false),
+            validated: self.validated,
             truncated: self.truncated.unwrap_or(false),
             errors: self.errors,
             pattern_id: self.pattern_id,
@@ -1009,9 +1010,25 @@ mod tests {
         assert_eq!(files[0].path, "out/1.jpg");
         assert_eq!(files[0].global_start, 1024);
         assert_eq!(files[0].global_end, 5120);
-        assert!(files[0].validated);
+        assert_eq!(files[0].validated, Some(true));
         assert_eq!(files[1].id, 2);
         assert_eq!(files[1].file_type, "png");
+    }
+
+    #[test]
+    fn test_reader_jsonl_missing_validation_is_not_run() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data =
+            r#"{"id":1,"file_type":"jpeg","offset":1024,"size":4096,"output_path":"out/1.jpg"}"#;
+        fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let files = reader.read_carved_files().unwrap();
+
+        assert_eq!(files[0].validated, None);
     }
 
     #[test]
@@ -1038,7 +1055,7 @@ mod tests {
         assert_eq!(files[0].size, 32);
         assert_eq!(files[0].md5.as_deref(), Some("md5-a"));
         assert_eq!(files[0].sha256.as_deref(), Some("sha-a"));
-        assert!(!files[0].validated);
+        assert_eq!(files[0].validated, Some(false));
         assert!(files[0].truncated);
         assert_eq!(files[0].errors, vec!["short footer"]);
         assert_eq!(files[0].pattern_id.as_deref(), Some("jpeg_soi"));
@@ -1071,13 +1088,13 @@ mod tests {
         assert_eq!(files[0].size, 32);
         assert_eq!(files[0].md5.as_deref(), Some("md5-a"));
         assert_eq!(files[0].sha256.as_deref(), Some("sha-a"));
-        assert!(files[0].validated);
+        assert_eq!(files[0].validated, Some(true));
         assert!(!files[0].truncated);
         assert_eq!(files[0].pattern_id.as_deref(), Some("jpeg_soi"));
         assert!(!files[0].is_duplicate);
 
         assert_eq!(files[1].id, 1);
-        assert!(!files[1].validated);
+        assert_eq!(files[1].validated, Some(false));
         assert!(files[1].truncated);
         assert_eq!(files[1].errors, vec!["truncated footer"]);
         assert!(files[1].is_duplicate);
@@ -1130,16 +1147,33 @@ mod tests {
         assert_eq!(files[0].size, 4096);
         assert_eq!(files[0].path, "carved/with, comma.jpg");
         assert_eq!(files[0].sha256.as_deref(), Some("abc123"));
-        assert!(files[0].validated);
+        assert_eq!(files[0].validated, Some(true));
         assert_eq!(files[0].mime_type.as_deref(), Some("image/jpeg"));
         assert_eq!(files[0].width, Some(800));
         assert_eq!(files[0].height, Some(600));
         assert_eq!(files[1].id, 1);
         assert_eq!(files[1].sha256, None);
-        assert!(!files[1].validated);
+        assert_eq!(files[1].validated, Some(false));
         assert_eq!(files[1].mime_type, None);
         assert_eq!(files[1].width, None);
         assert_eq!(files[1].height, None);
+    }
+
+    #[test]
+    fn test_reader_csv_missing_validation_is_not_run() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "id,file_type,global_start,size,carved_path\n1,jpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let files = reader.read_carved_files().unwrap();
+
+        assert_eq!(files[0].validated, None);
     }
 
     #[test]

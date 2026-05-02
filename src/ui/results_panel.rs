@@ -389,8 +389,8 @@ impl ResultsPanel {
                                 ui.end_row();
                             }
 
-                            ui.label("Valid:");
-                            ui.label(if file.validated { "Yes" } else { "No" });
+                            ui.label("Validation:");
+                            ui.label(validation_status_label(file.validated));
                             ui.end_row();
 
                             ui.label("Truncated:");
@@ -403,14 +403,16 @@ impl ResultsPanel {
                                 ui.end_row();
                             }
 
+                            ui.label("Duplicate:");
+                            ui.label(if file.is_duplicate { "Yes" } else { "No" });
+                            ui.end_row();
+
                             if file.is_duplicate {
-                                ui.label("Duplicate:");
-                                let duplicate = file
-                                    .duplicate_of_offset
-                                    .map(|offset| format!("Yes, original at 0x{offset:X}"))
-                                    .unwrap_or_else(|| "Yes".to_string());
-                                ui.label(duplicate);
-                                ui.end_row();
+                                if let Some(offset) = file.duplicate_of_offset {
+                                    ui.label("Original Offset:");
+                                    ui.label(format!("0x{offset:X} ({offset})"));
+                                    ui.end_row();
+                                }
                             }
 
                             if !file.errors.is_empty() {
@@ -525,6 +527,14 @@ fn format_error_list(errors: &[String]) -> String {
     truncate_chars(&redact_path_like_values(&errors.join("; ")), 240)
 }
 
+fn validation_status_label(validated: Option<bool>) -> &'static str {
+    match validated {
+        Some(true) => "Passed",
+        Some(false) => "Failed",
+        None => "Not run",
+    }
+}
+
 fn format_load_error(context: &str, error: &anyhow::Error) -> String {
     tracing::error!(error = ?error, error_chain = %format!("{:#}", error), "{context}");
     format!("{}. See application logs for details.", context)
@@ -582,7 +592,7 @@ mod tests {
             handler_id: None,
             md5: None,
             sha256: None,
-            validated: true,
+            validated: Some(true),
             truncated: false,
             errors: Vec::new(),
             pattern_id: None,
@@ -615,5 +625,12 @@ mod tests {
         assert!(!formatted.contains("C:\\case\\file.dd"));
         assert!(!formatted.contains("\\\\srv\\share\\img.dd"));
         assert!(!formatted.contains("cases/image.dd"));
+    }
+
+    #[test]
+    fn test_validation_status_label_distinguishes_missing_validation() {
+        assert_eq!(validation_status_label(Some(true)), "Passed");
+        assert_eq!(validation_status_label(Some(false)), "Failed");
+        assert_eq!(validation_status_label(None), "Not run");
     }
 }

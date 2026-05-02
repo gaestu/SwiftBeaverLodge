@@ -723,7 +723,7 @@ mod tests {
             checkpoint_path: Some("/var/tmp/run.ckpt".to_string()),
             resume_from: Some("/var/tmp/run.ckpt".to_string()),
             dry_run: false,
-            metadata_only: true,
+            metadata_only: false,
             validate_carved: true,
             remove_invalid: true,
             hash_algorithms: vec!["md5".to_string(), "sha256".to_string()],
@@ -758,7 +758,7 @@ mod tests {
             flag_value(&args, "--resume-from"),
             Some("/var/tmp/run.ckpt")
         );
-        assert!(args.iter().any(|a| a == "--metadata-only"));
+        assert!(!args.iter().any(|a| a == "--metadata-only"));
         assert!(!args.iter().any(|a| a == "--dry-run"));
         assert!(args.iter().any(|a| a == "--validate-carved"));
         assert!(args.iter().any(|a| a == "--remove-invalid"));
@@ -807,6 +807,21 @@ mod tests {
     }
 
     #[test]
+    fn test_build_cli_args_metadata_only_mode() {
+        let config = ScanConfig {
+            input_path: "/tmp/x".to_string(),
+            output_path: "/tmp/o".to_string(),
+            metadata_only: true,
+            ..Default::default()
+        };
+        let args = build_cli_args(&config);
+
+        assert!(args.iter().any(|a| a == "--metadata-only"));
+        assert!(!args.iter().any(|a| a == "--validate-carved"));
+        assert!(!args.iter().any(|a| a == "--remove-invalid"));
+    }
+
+    #[test]
     fn test_validate_flag_combinations_detects_invalid_pairs() {
         use crate::config::validate_flag_combinations;
 
@@ -836,7 +851,7 @@ mod tests {
 
         let config = ScanConfig {
             dry_run: false,
-            metadata_only: true,
+            metadata_only: false,
             validate_carved: true,
             remove_invalid: true,
             dedupe: true,
