@@ -1,11 +1,15 @@
 //! Results browser panel
 
 use egui::{Color32, RichText, Ui};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use crate::metadata::{
     CarvedFile, MetadataReader, MetadataRecord, MetadataSummary, RunSummary, StringArtefact,
 };
-use crate::scan::format_bytes;
+use crate::scan::{format_bytes, ScanState};
+
+const LIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Results browser panel
 pub struct ResultsPanel {
@@ -43,6 +47,16 @@ pub struct ResultsPanel {
     selected_file: Option<usize>,
     /// Error messages
     errors: Vec<String>,
+    /// Whether live metadata polling is enabled during active scans.
+    live_refresh_enabled: bool,
+    /// Background live refresh receiver, when a refresh is in flight.
+    live_refresh_rx: Option<Receiver<LiveRefreshResult>>,
+    /// Last live refresh start time, used to bound polling.
+    live_refresh_last_started: Option<Instant>,
+    /// Non-fatal live refresh status shown in the panel.
+    live_refresh_status: Option<String>,
+    /// Whether the currently displayed snapshot came from live refresh.
+    live_snapshot_active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -56,6 +70,23 @@ enum ResultsTab {
     BrowserDownloads,
     WindowsArtefacts,
     EntropyRegions,
+}
+
+impl ResultsTab {
+    fn supports_live_refresh(self) -> bool {
+        matches!(self, Self::Overview | Self::Files | Self::Strings)
+    }
+}
+
+struct LiveSnapshot {
+    reader: MetadataReader,
+    files: Vec<CarvedFile>,
+    strings: Vec<StringArtefact>,
+}
+
+struct LiveRefreshResult {
+    run_path: String,
+    result: anyhow::Result<LiveSnapshot>,
 }
 
 impl Default for ResultsPanel {
@@ -84,6 +115,11 @@ impl ResultsPanel {
             search_query: String::new(),
             selected_file: None,
             errors: Vec::new(),
+            live_refresh_enabled: true,
+            live_refresh_rx: None,
+            live_refresh_last_started: None,
+            live_refresh_status: None,
+            live_snapshot_active: false,
         }
     }
 
@@ -152,6 +188,14 @@ impl ResultsPanel {
         self.search_query.clear();
         self.selected_file = None;
         self.errors.clear();
+        self.clear_live_runtime_state();
+        self.live_snapshot_active = false;
+    }
+
+    fn clear_live_runtime_state(&mut self) {
+        self.live_refresh_rx = None;
+        self.live_refresh_last_started = None;
+        self.live_refresh_status = None;
     }
 
     fn push_error(&mut self, context: &str, error: &anyhow::Error) {
@@ -243,14 +287,30 @@ impl ResultsPanel {
     }
 
     /// Render the results panel
-    pub fn show(&mut self, ui: &mut Ui, run_output_path: Option<&str>) {
+    pub fn show(&mut self, ui: &mut Ui, run_output_path: Option<&str>, scan_state: ScanState) {
         ui.heading("Scan Results");
         ui.add_space(10.0);
+
+        self.poll_live_refresh();
 
         // Check if we need to load new results
         if let Some(path) = run_output_path {
             if self.run_path.as_deref() != Some(path) {
+                if scan_state == ScanState::Running {
+                    self.prepare_live_run(path);
+                } else {
+                    self.load(path);
+                }
+            } else if scan_state != ScanState::Running && self.live_snapshot_active {
                 self.load(path);
+            }
+        }
+
+        if scan_state == ScanState::Running {
+            if let Some(path) = run_output_path {
+                self.show_live_refresh_controls(ui, path);
+                self.maybe_start_live_refresh(path);
+                ui.add_space(10.0);
             }
         }
 
@@ -262,11 +322,15 @@ impl ResultsPanel {
 
         // No results loaded
         if self.reader.is_none() {
-            ui.label("No results loaded. Run a scan or load previous results.");
+            if scan_state == ScanState::Running && run_output_path.is_some() {
+                ui.label("Waiting for SwiftBeaver metadata in the reported run directory.");
+            } else {
+                ui.label("No results loaded. Run a scan or load previous results.");
+            }
 
             ui.add_space(10.0);
 
-            if ui.button("Load Previous Results...").clicked() {
+            if scan_state != ScanState::Running && ui.button("Load Previous Results...").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.load(&path.display().to_string());
                 }
@@ -332,6 +396,176 @@ impl ResultsPanel {
             ResultsTab::WindowsArtefacts => self.show_windows_artefacts(ui),
             ResultsTab::EntropyRegions => self.show_entropy_regions(ui),
         }
+    }
+
+    fn prepare_live_run(&mut self, run_path: &str) {
+        let previous_tab = self.current_tab;
+        self.clear_loaded_state();
+        self.run_path = Some(run_path.to_string());
+        if !previous_tab.supports_live_refresh() {
+            self.current_tab = ResultsTab::Files;
+        }
+        self.live_refresh_status = Some("Waiting for live metadata...".to_string());
+        self.live_snapshot_active = true;
+    }
+
+    fn show_live_refresh_controls(&mut self, ui: &mut Ui, run_path: &str) {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.live_refresh_enabled, "Live refresh");
+
+            let refresh_in_flight = self.live_refresh_rx.is_some();
+            if ui
+                .add_enabled(
+                    self.live_refresh_enabled && !refresh_in_flight,
+                    egui::Button::new("Refresh now"),
+                )
+                .clicked()
+            {
+                self.start_live_refresh(run_path);
+            }
+
+            if refresh_in_flight {
+                ui.spinner();
+                ui.label("Refreshing...");
+            } else if let Some(status) = &self.live_refresh_status {
+                ui.label(status);
+            }
+        });
+    }
+
+    fn maybe_start_live_refresh(&mut self, run_path: &str) {
+        if !self.live_refresh_enabled || self.live_refresh_rx.is_some() {
+            return;
+        }
+
+        let now = Instant::now();
+        if self
+            .live_refresh_last_started
+            .is_some_and(|last_started| now.duration_since(last_started) < LIVE_REFRESH_INTERVAL)
+        {
+            return;
+        }
+
+        self.start_live_refresh(run_path);
+    }
+
+    fn start_live_refresh(&mut self, run_path: &str) {
+        if self.live_refresh_rx.is_some() {
+            return;
+        }
+
+        let run_path = run_path.to_string();
+        let reader = self.reader.clone();
+        let (tx, rx) = channel();
+        self.live_refresh_rx = Some(rx);
+        self.live_refresh_last_started = Some(Instant::now());
+
+        std::thread::spawn(move || {
+            let result = reader
+                .map_or_else(|| MetadataReader::new(&run_path), Ok)
+                .and_then(|reader| {
+                    let files = reader.read_live_carved_files()?;
+                    let strings = reader.read_live_string_artefacts()?;
+                    Ok(LiveSnapshot {
+                        reader,
+                        files,
+                        strings,
+                    })
+                });
+            let _ = tx.send(LiveRefreshResult { run_path, result });
+        });
+    }
+
+    fn poll_live_refresh(&mut self) {
+        let Some(received) = self
+            .live_refresh_rx
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(result) => Some(Ok(result)),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(())),
+            })
+        else {
+            return;
+        };
+
+        self.live_refresh_rx = None;
+
+        match received {
+            Ok(result) => self.apply_live_refresh_result(result),
+            Err(()) => {
+                self.live_refresh_status = Some("Live refresh worker stopped.".to_string());
+            }
+        }
+    }
+
+    fn apply_live_refresh_result(&mut self, refresh: LiveRefreshResult) {
+        if self.run_path.as_deref() != Some(refresh.run_path.as_str()) {
+            return;
+        }
+
+        match refresh.result {
+            Ok(snapshot) => {
+                self.reader = Some(snapshot.reader);
+                self.live_snapshot_active = true;
+                let previous_len = self.files.len();
+                self.replace_files_preserving_selection(snapshot.files);
+                self.strings = snapshot.strings;
+
+                let added = self.files.len().saturating_sub(previous_len);
+                let mut status = if added > 0 {
+                    format!("Live results: {} files (+{})", self.files.len(), added)
+                } else {
+                    format!("Live results: {} files", self.files.len())
+                };
+
+                if let Err(error) = self.refresh_summary_from_loaded_results() {
+                    tracing::debug!(
+                        error = ?error,
+                        "Live metadata refresh kept previous summary after recompute failure"
+                    );
+                    status.push_str("; summary unchanged");
+                }
+
+                self.live_refresh_status = Some(status);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error = ?error,
+                    "Live metadata refresh did not produce a usable snapshot"
+                );
+                let error_chain = format!("{:#}", error);
+                self.live_refresh_status = Some(
+                    if error_chain.contains(MetadataReader::LIVE_REFRESH_UNSUPPORTED_BACKEND) {
+                        MetadataReader::LIVE_REFRESH_UNSUPPORTED_BACKEND.to_string()
+                    } else if self.reader.is_some() {
+                        "Live refresh skipped while metadata is being written.".to_string()
+                    } else {
+                        "Waiting for live metadata...".to_string()
+                    },
+                );
+            }
+        }
+    }
+
+    fn refresh_summary_from_loaded_results(&mut self) -> anyhow::Result<()> {
+        self.summary = Some(MetadataSummary::from_results(&self.files, &self.strings)?);
+        Ok(())
+    }
+
+    fn replace_files_preserving_selection(&mut self, files: Vec<CarvedFile>) {
+        let selected_key = self
+            .selected_file
+            .and_then(|idx| self.files.get(idx))
+            .map(carved_file_key);
+
+        self.files = files;
+
+        self.selected_file = selected_key.and_then(|key| {
+            self.files
+                .iter()
+                .position(|file| carved_file_key(file) == key)
+        });
     }
 
     fn show_browser_history(&mut self, ui: &mut Ui) {
@@ -856,6 +1090,10 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     truncated
 }
 
+fn carved_file_key(file: &CarvedFile) -> (u64, u64, u64, String) {
+    (file.id, file.global_start, file.size, file.path.clone())
+}
+
 fn summary_metric_row(ui: &mut Ui, label: &str, value: Option<String>) {
     ui.label(label);
     ui.label(RichText::new(value.unwrap_or_else(|| "Not reported".to_string())).strong());
@@ -1034,25 +1272,15 @@ fn is_path_like_token(token: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_results_panel_new() {
-        let panel = ResultsPanel::new();
-        assert!(panel.run_path.is_none());
-        assert!(panel.files.is_empty());
-        assert!(panel.strings.is_empty());
-    }
-
-    #[test]
-    fn test_results_panel_clear() {
-        let mut panel = ResultsPanel::new();
-        panel.files.push(CarvedFile {
-            id: 1,
+    fn sample_file(id: u64, path: &str) -> CarvedFile {
+        CarvedFile {
+            id,
             run_id: None,
             file_type: "jpeg".to_string(),
-            path: "test.jpg".to_string(),
+            path: path.to_string(),
             extension: Some("jpg".to_string()),
-            global_start: 0,
-            global_end: 100,
+            global_start: id * 100,
+            global_end: id * 100 + 100,
             size: 100,
             handler_id: None,
             md5: None,
@@ -1066,10 +1294,137 @@ mod tests {
             mime_type: None,
             width: None,
             height: None,
-        });
+        }
+    }
+
+    fn sample_string(content: &str) -> StringArtefact {
+        StringArtefact {
+            artefact_kind: "email".to_string(),
+            content: content.to_string(),
+            global_start: 10,
+            global_end: Some(20),
+            length: 10,
+            encoding: Some("utf8".to_string()),
+            source: None,
+            run_id: None,
+        }
+    }
+
+    fn temp_jsonl_reader() -> (tempfile::TempDir, String, MetadataReader) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        std::fs::create_dir(&metadata_dir).unwrap();
+        std::fs::write(metadata_dir.join("carved_files.jsonl"), "").unwrap();
+        let run_path = temp.path().display().to_string();
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        (temp, run_path, reader)
+    }
+
+    #[test]
+    fn test_results_panel_new() {
+        let panel = ResultsPanel::new();
+        assert!(panel.run_path.is_none());
+        assert!(panel.files.is_empty());
+        assert!(panel.strings.is_empty());
+    }
+
+    #[test]
+    fn test_results_panel_clear() {
+        let mut panel = ResultsPanel::new();
+        panel.files.push(sample_file(1, "test.jpg"));
 
         panel.clear();
         assert!(panel.files.is_empty());
+    }
+
+    #[test]
+    fn test_live_refresh_preserves_selected_file_by_metadata_key() {
+        let mut panel = ResultsPanel::new();
+        panel.files = vec![sample_file(1, "one.jpg"), sample_file(2, "two.jpg")];
+        panel.selected_file = Some(1);
+
+        panel.replace_files_preserving_selection(vec![
+            sample_file(3, "new.jpg"),
+            sample_file(1, "one.jpg"),
+            sample_file(2, "two.jpg"),
+        ]);
+
+        assert_eq!(panel.selected_file, Some(2));
+        assert_eq!(panel.files[2].path, "two.jpg");
+    }
+
+    #[test]
+    fn test_live_refresh_clears_selection_when_file_disappears() {
+        let mut panel = ResultsPanel::new();
+        panel.files = vec![sample_file(1, "one.jpg"), sample_file(2, "two.jpg")];
+        panel.selected_file = Some(1);
+
+        panel.replace_files_preserving_selection(vec![sample_file(1, "one.jpg")]);
+
+        assert_eq!(panel.selected_file, None);
+    }
+
+    #[test]
+    fn test_live_refresh_updates_strings_and_summary() {
+        let (_temp, run_path, reader) = temp_jsonl_reader();
+        let mut panel = ResultsPanel::new();
+        panel.run_path = Some(run_path.clone());
+
+        panel.apply_live_refresh_result(LiveRefreshResult {
+            run_path,
+            result: Ok(LiveSnapshot {
+                reader,
+                files: vec![sample_file(1, "one.jpg")],
+                strings: vec![sample_string("a@example.test")],
+            }),
+        });
+
+        assert_eq!(panel.files.len(), 1);
+        assert_eq!(panel.strings.len(), 1);
+        assert_eq!(panel.summary.as_ref().unwrap().string_artefacts, 1);
+    }
+
+    #[test]
+    fn test_live_refresh_preserves_summary_on_recompute_error() {
+        let (_temp, run_path, reader) = temp_jsonl_reader();
+        let mut panel = ResultsPanel::new();
+        panel.run_path = Some(run_path.clone());
+        panel.summary =
+            Some(MetadataSummary::from_results(&[sample_file(1, "old.jpg")], &[]).unwrap());
+
+        let mut huge_file = sample_file(1, "huge.jpg");
+        huge_file.size = u64::MAX;
+        let mut extra_file = sample_file(2, "extra.jpg");
+        extra_file.size = 1;
+
+        panel.apply_live_refresh_result(LiveRefreshResult {
+            run_path,
+            result: Ok(LiveSnapshot {
+                reader,
+                files: vec![huge_file, extra_file],
+                strings: Vec::new(),
+            }),
+        });
+
+        let summary = panel.summary.as_ref().unwrap();
+        assert_eq!(summary.total_files, 1);
+        assert!(panel
+            .live_refresh_status
+            .as_deref()
+            .unwrap()
+            .contains("summary unchanged"));
+    }
+
+    #[test]
+    fn test_prepare_live_run_preserves_live_backed_tabs() {
+        let mut panel = ResultsPanel::new();
+        panel.current_tab = ResultsTab::Overview;
+        panel.prepare_live_run("/tmp/run-one");
+        assert_eq!(panel.current_tab, ResultsTab::Overview);
+
+        panel.current_tab = ResultsTab::BrowserHistory;
+        panel.prepare_live_run("/tmp/run-two");
+        assert_eq!(panel.current_tab, ResultsTab::Files);
     }
 
     #[test]

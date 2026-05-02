@@ -350,9 +350,13 @@ impl eframe::App for SwiftBeaverApp {
             Tab::Monitor => {
                 self.progress_panel
                     .show(ui, state, progress.as_ref(), &logs);
+                ui.separator();
+                self.results_panel
+                    .show(ui, self.last_run_path.as_deref(), state);
             }
             Tab::Results => {
-                self.results_panel.show(ui, self.last_run_path.as_deref());
+                self.results_panel
+                    .show(ui, self.last_run_path.as_deref(), state);
             }
         });
 

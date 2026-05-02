@@ -1,7 +1,7 @@
 //! Metadata reader for Parquet, JSONL, and CSV files
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -17,12 +17,16 @@ use serde::Deserialize;
 use super::types::{CarvedFile, MetadataRecord, RunSummary, StringArtefact};
 
 /// Reader for scan metadata
+#[derive(Clone)]
 pub struct MetadataReader {
     run_path: PathBuf,
     backend: String,
 }
 
 impl MetadataReader {
+    pub const LIVE_REFRESH_UNSUPPORTED_BACKEND: &'static str =
+        "Live refresh is available only with JSONL metadata";
+
     /// Create a new metadata reader for a run directory
     pub fn new(run_path: impl AsRef<Path>) -> Result<Self> {
         let run_path = run_path.as_ref().to_path_buf();
@@ -47,6 +51,32 @@ impl MetadataReader {
             "jsonl" => self.read_carved_files_jsonl(),
             "csv" => self.read_carved_files_csv(),
             _ => bail!("Unknown metadata backend: {}", self.backend),
+        }
+    }
+
+    /// Read carved files for live UI refreshes.
+    ///
+    /// JSONL metadata can be observed while SwiftBeaver is appending a record.
+    /// Ignore one trailing unterminated partial line and keep all complete rows.
+    /// Other backends are finalized too late for incremental live refresh.
+    pub fn read_live_carved_files(&self) -> Result<Vec<CarvedFile>> {
+        match self.backend.as_str() {
+            "jsonl" => self.read_carved_files_jsonl_live(),
+            backend => bail!(
+                "{} (detected {backend})",
+                Self::LIVE_REFRESH_UNSUPPORTED_BACKEND
+            ),
+        }
+    }
+
+    /// Read string artefacts for live UI refreshes.
+    pub fn read_live_string_artefacts(&self) -> Result<Vec<StringArtefact>> {
+        match self.backend.as_str() {
+            "jsonl" => self.read_string_artefacts_jsonl_live(),
+            backend => bail!(
+                "{} (detected {backend})",
+                Self::LIVE_REFRESH_UNSUPPORTED_BACKEND
+            ),
         }
     }
 
@@ -159,6 +189,38 @@ impl MetadataReader {
                 format!("Failed to parse carved_files.jsonl line {}", line_index + 1)
             })?;
             files.push(row.into_carved_file(line_index as u64)?);
+        }
+
+        Ok(files)
+    }
+
+    fn read_carved_files_jsonl_live(&self) -> Result<Vec<CarvedFile>> {
+        let jsonl_path = self.run_path.join("metadata").join("carved_files.jsonl");
+        let data = fs::read_to_string(&jsonl_path)?;
+        let has_trailing_newline = data.ends_with('\n') || data.ends_with('\r');
+        let lines: Vec<_> = data.lines().collect();
+
+        let mut files = Vec::new();
+        for (line_index, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<JsonCarvedFileRow>(line) {
+                Ok(row) => files.push(row.into_carved_file(line_index as u64)?),
+                Err(error) if !has_trailing_newline && line_index + 1 == lines.len() => {
+                    tracing::debug!(
+                        error = ?error,
+                        line = line_index + 1,
+                        "Ignoring trailing partial carved_files.jsonl row during live refresh"
+                    );
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Failed to parse carved_files.jsonl line {}", line_index + 1)
+                    });
+                }
+            }
         }
 
         Ok(files)
@@ -506,16 +568,20 @@ impl MetadataReader {
         Ok(artefacts)
     }
 
-    /// Read string artefacts from JSONL
-    fn read_string_artefacts_jsonl(&self) -> Result<Vec<StringArtefact>> {
+    fn jsonl_string_artefacts_path(&self) -> PathBuf {
         let metadata_dir = self.run_path.join("metadata");
         let jsonl_path = metadata_dir.join("string_artefacts.jsonl");
         let legacy_jsonl_path = metadata_dir.join("strings.jsonl");
-        let jsonl_path = if jsonl_path.exists() {
+        if jsonl_path.exists() {
             jsonl_path
         } else {
             legacy_jsonl_path
-        };
+        }
+    }
+
+    /// Read string artefacts from JSONL
+    fn read_string_artefacts_jsonl(&self) -> Result<Vec<StringArtefact>> {
+        let jsonl_path = self.jsonl_string_artefacts_path();
 
         if !jsonl_path.exists() {
             return Ok(Vec::new());
@@ -541,6 +607,49 @@ impl MetadataReader {
                     )
                 })?;
             artefacts.push(artefact.into_string_artefact(&jsonl_path, line_index + 1)?);
+        }
+
+        Ok(artefacts)
+    }
+
+    fn read_string_artefacts_jsonl_live(&self) -> Result<Vec<StringArtefact>> {
+        let jsonl_path = self.jsonl_string_artefacts_path();
+
+        if !jsonl_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let data = fs::read_to_string(&jsonl_path)?;
+        let has_trailing_newline = data.ends_with('\n') || data.ends_with('\r');
+        let lines: Vec<_> = data.lines().collect();
+
+        let mut artefacts = Vec::new();
+        for (line_index, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<JsonStringArtefactRow>(line) {
+                Ok(row) => {
+                    artefacts.push(row.into_string_artefact(&jsonl_path, line_index + 1)?);
+                }
+                Err(error) if !has_trailing_newline && line_index + 1 == lines.len() => {
+                    tracing::debug!(
+                        error = ?error,
+                        line = line_index + 1,
+                        "Ignoring trailing partial string artefact JSONL row during live refresh"
+                    );
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Failed to parse {} line {}",
+                            metadata_file_name(&jsonl_path),
+                            line_index + 1
+                        )
+                    });
+                }
+            }
         }
 
         Ok(artefacts)
@@ -1448,6 +1557,81 @@ mod tests {
         assert_eq!(files[0].validated, Some(true));
         assert_eq!(files[1].id, 2);
         assert_eq!(files[1].file_type, "png");
+    }
+
+    #[test]
+    fn test_reader_live_jsonl_ignores_trailing_partial_row() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data = r#"{"id":1,"file_type":"jpeg","offset":1024,"size":4096,"output_path":"out/1.jpg","is_valid":true}
+{"id":2,"file_type":"png","offset":5120"#;
+        fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let files = reader.read_live_carved_files().unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, 1);
+        assert_eq!(files[0].file_type, "jpeg");
+    }
+
+    #[test]
+    fn test_reader_live_jsonl_rejects_malformed_complete_row() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data = "{\"id\":1,\"file_type\":\"jpeg\",\"offset\":1024}\nnot-json\n";
+        fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let result = reader.read_live_carved_files();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reader_live_jsonl_string_artefacts_ignore_trailing_partial_row() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.jsonl"),
+            r#"{"file_type":"jpeg","path":"1.jpg","global_start":0,"size":10}"#,
+        )
+        .unwrap();
+
+        let data = r#"{"artefact_kind":"email","content":"a@example.test","global_start":20,"global_end":34}
+{"artefact_kind":"url","content":"https://example"#;
+        fs::write(metadata_dir.join("string_artefacts.jsonl"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let strings = reader.read_live_string_artefacts().unwrap();
+
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "email");
+        assert_eq!(strings[0].content, "a@example.test");
+    }
+
+    #[test]
+    fn test_reader_live_refresh_rejects_csv_backend() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let result = reader.read_live_carved_files();
+
+        assert!(result.is_err());
+        assert!(format!("{:#}", result.unwrap_err())
+            .contains(MetadataReader::LIVE_REFRESH_UNSUPPORTED_BACKEND));
     }
 
     #[test]

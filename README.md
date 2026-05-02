@@ -13,7 +13,7 @@ A pure Rust desktop application for forensic file recovery using [egui](https://
 - **Raw device scanning** - Direct access to /dev/sdX, /dev/nvmeXnY devices with dropdown selection
 - 🔍 **Comprehensive file recovery** - Images, documents, archives, databases, media, and more
 - 🔗 **String/URL/Email extraction** - Find text patterns in evidence
-- 📊 **Real-time progress monitoring** - Live throughput, ETA, and statistics
+- 📊 **Real-time progress monitoring** - Live throughput, ETA, statistics, and newly carved file metadata
 - 📁 **Result browsing** - Filter and search carved files plus SwiftBeaver v0.5.1 run summaries, string artefacts, browser artefacts, Windows artefacts, and entropy regions from Parquet, JSONL, and CSV metadata
 - 💾 **Offline/Airgapped operation** - No network required for forensic integrity
 - 🚀 **GPU acceleration** - Optional OpenCL/CUDA support via the `--gpu` flag
@@ -100,8 +100,10 @@ the `--gpu` flag.
 
 1. **Configure** - Select evidence source (file or raw device), output directory, and file types
 2. **Start Scan** - Click "▶ Start Scan" to begin carving
-3. **Monitor** - Watch real-time progress and logs
+3. **Monitor** - Watch real-time progress, logs, and newly carved files as metadata is written
 4. **Browse Results** - View carved files, run metrics, and artefact metadata
+
+Live result refresh uses SwiftBeaver's reported run output directory and can be disabled from the Monitor or Results view if a long scan's result table becomes noisy.
 
 ### Raw Device Scanning
 
