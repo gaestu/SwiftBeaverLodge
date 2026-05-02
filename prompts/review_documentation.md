@@ -9,7 +9,7 @@ Run this review when:
 - `README.md` changed
 - files under `docs/` changed
 - files under `prompts/` changed
-- binary setup, SwiftBeaver CLI flags, GPU variants, metadata support, or visible UI workflow changed
+- binary setup, SwiftBeaver CLI flags, release build flavor guidance, metadata support, or visible UI workflow changed
 - tests or code reveal stale project guidance
 
 ## Focus
@@ -18,7 +18,7 @@ Check for:
 
 - README and docs aligned with the current Rust egui application
 - no stale claims that SwiftBeaverLodge is the SwiftBeaver engine, a Tauri/Svelte app, or a direct SwiftBeaver library wrapper unless explicitly historical
-- binary download and variant instructions matching `download-swiftbeaver.sh`, `bin/`, and `src/scan/mod.rs`
+- binary download and release build flavor instructions matching `download-swiftbeaver.sh`, `bin/`, and `src/scan/mod.rs`
 - CLI option descriptions matching `build_cli_args`
 - metadata support descriptions matching `MetadataBackend` and `MetadataReader`
 - user-facing text that is accurate, concise, and not misleading

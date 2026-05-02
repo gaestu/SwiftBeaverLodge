@@ -46,11 +46,12 @@ sudo apt install libgtk-3-dev libglib2.0-dev libpango1.0-dev \
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/SwiftBeaverLodge.git
+git clone https://github.com/gaestu/SwiftBeaverLodge.git
 cd SwiftBeaverLodge
 
 # Install SwiftBeaver v0.5.1+ so `swiftbeaver` is on PATH
-# (e.g. via your distribution's package manager or the upstream installer)
+# (for example, extract an upstream SwiftBeaver release and move the
+# `swiftbeaver` binary to /usr/local/bin)
 swiftbeaver --version   # should report >= 0.5.1
 
 # Build
@@ -59,6 +60,22 @@ cargo build --release
 # Run
 ./target/release/swiftbeaverlodge
 ```
+
+If you do not want to install SwiftBeaver system-wide, the repository includes
+a convenience helper:
+
+```bash
+# Installs one upstream release package as ./bin/swiftbeaver
+./download-swiftbeaver.sh cpu-only
+
+# Then run Lodge from this checkout
+cargo run --bin swiftbeaverlodge
+```
+
+The upstream SwiftBeaver release artifacts are packaged by build flavor
+(`cpu-only`, `opencl`, or `cuda`), but SwiftBeaverLodge always uses a single
+binary path named `swiftbeaver`. GPU use is controlled by the GUI's GPU toggle,
+which adds SwiftBeaver's `--gpu` flag.
 
 ## SwiftBeaver discovery
 
@@ -75,6 +92,10 @@ the `--gpu` flag.
 | Binary Name | Notes |
 |-------------|-------|
 | `swiftbeaver` | v0.5.1+; GPU enabled via `--gpu` |
+
+Older `swiftbeaver-cpu-only`, `swiftbeaver-opencl`, and `swiftbeaver-cuda`
+binary selection workflows are historical. Current Lodge builds do not expose a
+binary-flavor selector and do not look for those names.
 
 ## Screenshot
 
@@ -104,6 +125,23 @@ the `--gpu` flag.
 4. **Browse Results** - View carved files, run metrics, and artefact metadata
 
 Live result refresh uses SwiftBeaver's reported run output directory and can be disabled from the Monitor or Results view if a long scan's result table becomes noisy.
+
+### Metadata and results
+
+SwiftBeaverLodge supports the metadata backends exposed by SwiftBeaver v0.5.1:
+
+| Backend | Lodge support |
+|---------|---------------|
+| Parquet | Default backend; reads `parquet/files_*.parquet` and optional artefact tables |
+| JSONL | Supported fallback; enables live refresh while SwiftBeaver appends complete JSONL rows |
+| CSV | Supported for carved-file metadata in current builds (added after issue #7) |
+
+The Results view includes tabs for overview metrics, carved files, string
+artefacts, browser history/cookies/downloads, Windows artefacts, and entropy
+regions when the corresponding SwiftBeaver metadata tables exist. During an
+active scan, live refresh is limited to Overview, Files, and Strings because
+JSONL can be read safely while it is being appended; Parquet and CSV are loaded
+after SwiftBeaver finalizes the run.
 
 ### Raw Device Scanning
 
