@@ -1,0 +1,2 @@
+run_id,bytes_scanned,chunks_processed,hits,files_carved,rejected,prevalidation_rejected,overlap_skipped,string_spans,artefacts_extracted,duplicates_found,duplicates_skipped
+20260428T140203Z_09e96cdf,2097152,2,18,4,1,0,3,2,2,1,1

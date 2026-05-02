@@ -1,0 +1,3 @@
+{"timestamp":"2026-04-28T14:02:03.166515Z","level":"INFO","fields":{"message":"starting run_id=20260428T140203Z_09e96cdf input=/fixtures/evidence.dd output=out/20260428T140203Z_09e96cdf scan_workers=16 carve_workers=16 chunk_mib=64"},"target":"swiftbeaver"}
+{"timestamp":"2026-04-28T14:02:04.188362Z","level":"INFO","fields":{"message":"progress 50.0% scanned=1048576/2097152 hits=12 files=3 rate=42.50MiB/s eta=5s errs=[carve:0 meta:0 sql:0]"},"target":"swiftbeaver"}
+{"timestamp":"2026-04-28T14:02:05.188362Z","level":"INFO","fields":{"message":"progress 100.0% scanned=2097152/2097152 hits=18 files=4 rate=109.81MiB/s eta=N/A errs=[carve:0 meta:0 sql:0]"},"target":"swiftbeaver"}

@@ -711,13 +711,27 @@ mod tests {
 
         let args = build_cli_args(&config);
 
-        assert!(args.contains(&"--input".to_string()));
-        assert!(args.contains(&"/tmp/test.dd".to_string()));
-        assert!(args.contains(&"--output".to_string()));
-        assert!(args.contains(&"--log-format".to_string()));
-        assert!(args.contains(&"json".to_string()));
-        assert!(args.contains(&"--metadata-backend".to_string()));
-        assert!(args.contains(&"parquet".to_string()));
+        assert_eq!(
+            args,
+            vec![
+                "--input",
+                "/tmp/test.dd",
+                "--output",
+                "/tmp/output",
+                "--log-format",
+                "json",
+                "--progress-interval-secs",
+                "1",
+                "--metadata-backend",
+                "parquet",
+                "--types",
+                "jpeg,png,gif,webp,bmp,tiff,pdf,zip,sqlite,docx,xlsx,pptx,mp4",
+                "--scan-strings",
+                "--compute-evidence-sha256",
+                "--chunk-size-mib",
+                "64",
+            ]
+        );
     }
 
     #[test]
@@ -800,6 +814,14 @@ mod tests {
             input_path: "/evidence/disk.dd".to_string(),
             output_path: "/out".to_string(),
             config_path: Some("/etc/swiftbeaver.yaml".to_string()),
+            file_types: vec!["jpeg".to_string(), "sqlite_page".to_string()],
+            disable_zip: true,
+            scan_urls: false,
+            scan_emails: false,
+            scan_phones: false,
+            scan_utf16: true,
+            gpu_enabled: true,
+            metadata_backend: crate::config::MetadataBackend::Csv,
             evidence_sha256: Some("deadbeef".to_string()),
             scan_workers: 4,
             carve_workers: 8,
@@ -811,7 +833,10 @@ mod tests {
             scan_entropy: true,
             entropy_window_bytes: Some(4096),
             entropy_threshold: 6.5,
+            max_bytes: Some(1_048_576),
             max_chunks: Some(10),
+            max_files: Some(100),
+            max_memory_mib: Some(512),
             max_open_files: Some(2048),
             checkpoint_path: Some("/var/tmp/run.ckpt".to_string()),
             resume_from: Some("/var/tmp/run.ckpt".to_string()),
@@ -828,37 +853,73 @@ mod tests {
         let args = build_cli_args(&config);
 
         assert_eq!(
-            flag_value(&args, "--config-path"),
-            Some("/etc/swiftbeaver.yaml")
+            args,
+            vec![
+                "--input",
+                "/evidence/disk.dd",
+                "--output",
+                "/out",
+                "--log-format",
+                "json",
+                "--progress-interval-secs",
+                "1",
+                "--metadata-backend",
+                "csv",
+                "--config-path",
+                "/etc/swiftbeaver.yaml",
+                "--types",
+                "jpeg,sqlite_page",
+                "--disable-zip",
+                "--scan-strings",
+                "--scan-utf16",
+                "--no-scan-urls",
+                "--no-scan-emails",
+                "--no-scan-phones",
+                "--string-min-len",
+                "12",
+                "--scan-entropy",
+                "--entropy-window-bytes",
+                "4096",
+                "--entropy-threshold",
+                "6.5",
+                "--gpu",
+                "--compute-evidence-sha256",
+                "--evidence-sha256",
+                "deadbeef",
+                "--max-bytes",
+                "1048576",
+                "--max-chunks",
+                "10",
+                "--max-files",
+                "100",
+                "--max-memory-mib",
+                "512",
+                "--max-open-files",
+                "2048",
+                "--workers",
+                "16",
+                "--scan-workers",
+                "4",
+                "--carve-workers",
+                "8",
+                "--write-workers",
+                "2",
+                "--chunk-size-mib",
+                "128",
+                "--overlap-kib",
+                "128",
+                "--validate-carved",
+                "--remove-invalid",
+                "--hash-algorithms",
+                "md5,sha256",
+                "--dedupe",
+                "--skip-duplicates",
+                "--checkpoint-path",
+                "/var/tmp/run.ckpt",
+                "--resume-from",
+                "/var/tmp/run.ckpt",
+            ]
         );
-        assert_eq!(flag_value(&args, "--evidence-sha256"), Some("deadbeef"));
-        assert_eq!(flag_value(&args, "--workers"), Some("16"));
-        assert_eq!(flag_value(&args, "--scan-workers"), Some("4"));
-        assert_eq!(flag_value(&args, "--carve-workers"), Some("8"));
-        assert_eq!(flag_value(&args, "--write-workers"), Some("2"));
-        assert_eq!(flag_value(&args, "--chunk-size-mib"), Some("128"));
-        assert_eq!(flag_value(&args, "--overlap-kib"), Some("128"));
-        assert_eq!(flag_value(&args, "--string-min-len"), Some("12"));
-        assert!(args.iter().any(|a| a == "--scan-entropy"));
-        assert_eq!(flag_value(&args, "--entropy-window-bytes"), Some("4096"));
-        assert_eq!(flag_value(&args, "--entropy-threshold"), Some("6.5"));
-        assert_eq!(flag_value(&args, "--max-chunks"), Some("10"));
-        assert_eq!(flag_value(&args, "--max-open-files"), Some("2048"));
-        assert_eq!(
-            flag_value(&args, "--checkpoint-path"),
-            Some("/var/tmp/run.ckpt")
-        );
-        assert_eq!(
-            flag_value(&args, "--resume-from"),
-            Some("/var/tmp/run.ckpt")
-        );
-        assert!(!args.iter().any(|a| a == "--metadata-only"));
-        assert!(!args.iter().any(|a| a == "--dry-run"));
-        assert!(args.iter().any(|a| a == "--validate-carved"));
-        assert!(args.iter().any(|a| a == "--remove-invalid"));
-        assert_eq!(flag_value(&args, "--hash-algorithms"), Some("md5,sha256"));
-        assert!(args.iter().any(|a| a == "--dedupe"));
-        assert!(args.iter().any(|a| a == "--skip-duplicates"));
     }
 
     #[test]
