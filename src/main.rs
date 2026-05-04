@@ -13,6 +13,17 @@ use eframe::egui;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn main() -> eframe::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.as_slice(), [arg] if arg == "--version" || arg == "-V") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if !args.is_empty() {
+        eprintln!("unsupported arguments: {}", args.join(" "));
+        std::process::exit(2);
+    }
+
     // Initialize logging
     tracing_subscriber::registry()
         .with(fmt::layer())

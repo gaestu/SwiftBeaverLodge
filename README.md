@@ -47,16 +47,36 @@ sudo apt install libgtk-3-dev libglib2.0-dev libpango1.0-dev \
 Tagged SwiftBeaverLodge releases publish a bundled Linux x86_64 archive:
 
 ```bash
+# Download install.sh from a SwiftBeaverLodge release or run it from a checkout.
+# Installs to /usr/local/bin when writable, otherwise $HOME/.local/bin
+./install.sh
+```
+
+The installer downloads the bundled release, installs `swiftbeaverlodge` and
+`bin/swiftbeaver`, verifies both binaries, and preserves the app's normal
+SwiftBeaver discovery path. Set `LODGE_VERSION=v0.1.0` to install a specific
+release, or `INSTALL_DIR=/custom/bin` to choose the install location. Advanced
+users can replace the bundled engine during install with
+`SWIFTBEAVER_VERSION=v0.5.1 SWIFTBEAVER_FLAVOR=opencl ./install.sh`.
+Set `EXPOSE_SWIFTBEAVER=1` to also expose `swiftbeaver` directly in
+`INSTALL_DIR`; existing files at that path are left untouched.
+
+To install manually instead:
+
+```bash
 tar -xzf swiftbeaverlodge-linux-x86_64.tar.gz
 cd swiftbeaverlodge-linux-x86_64
 ./swiftbeaverlodge
 ```
+
+Run `swiftbeaverlodge --version` to print the installed Lodge build version.
 
 The archive contains both the GUI and a compatible CPU-only SwiftBeaver engine:
 
 ```text
 swiftbeaverlodge
 bin/swiftbeaver
+install.sh
 README.md
 LICENSE
 BUNDLED_SWIFTBEAVER.txt

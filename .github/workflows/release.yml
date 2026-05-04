@@ -218,7 +218,8 @@ jobs:
 
           cp target/release/swiftbeaverlodge "${package_dir}/swiftbeaverlodge"
           cp "${SWIFTBEAVER_BINARY}" "${package_dir}/bin/swiftbeaver"
-          chmod 0755 "${package_dir}/swiftbeaverlodge" "${package_dir}/bin/swiftbeaver"
+          cp install.sh "${package_dir}/install.sh"
+          chmod 0755 "${package_dir}/swiftbeaverlodge" "${package_dir}/bin/swiftbeaver" "${package_dir}/install.sh"
 
           cp README.md LICENSE "${package_dir}/"
           cat > "${package_dir}/BUNDLED_SWIFTBEAVER.txt" <<EOF
@@ -229,7 +230,10 @@ jobs:
           EOF
 
           tar -C "${RUNNER_TEMP}" -czf "${dist_dir}/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
+          cp install.sh "${dist_dir}/install.sh"
+          chmod 0755 "${dist_dir}/install.sh"
           (cd "${dist_dir}" && sha256sum "${PACKAGE_NAME}.tar.gz" > checksums.txt)
+          (cd "${dist_dir}" && sha256sum install.sh >> checksums.txt)
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
