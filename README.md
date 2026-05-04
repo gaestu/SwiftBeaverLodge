@@ -281,7 +281,15 @@ cargo test
 
 # Run with output
 cargo test -- --nocapture
+
+# Optional installed/bundled SwiftBeaver smoke test (requires v0.5.1+)
+cargo test --test installed_swiftbeaver_smoke -- --ignored --nocapture
 ```
+
+The optional smoke test runs a tiny temporary fixture through the real
+`swiftbeaver` command discovered by Lodge, then loads metadata from the run
+output path reported by SwiftBeaver. It is ignored by default so machines
+without SwiftBeaver are not blocked by the normal test suite.
 
 ## Tech Stack
 
