@@ -42,7 +42,33 @@ sudo apt install libgtk-3-dev libglib2.0-dev libpango1.0-dev \
                  libxkbcommon-dev libwayland-dev
 ```
 
-### Installation
+### Release Downloads
+
+Tagged SwiftBeaverLodge releases publish a bundled Linux x86_64 archive:
+
+```bash
+tar -xzf swiftbeaverlodge-linux-x86_64.tar.gz
+cd swiftbeaverlodge-linux-x86_64
+./swiftbeaverlodge
+```
+
+The archive contains both the GUI and a compatible CPU-only SwiftBeaver engine:
+
+```text
+swiftbeaverlodge
+bin/swiftbeaver
+README.md
+LICENSE
+BUNDLED_SWIFTBEAVER.txt
+```
+
+Release assets include `checksums.txt` with SHA-256 checksums. Windows bundled
+archives are planned after compatible upstream SwiftBeaver Windows release
+assets are available. Until then, Windows users should build from source and
+place a compatible `swiftbeaver.exe` in `bin/` next to `swiftbeaverlodge.exe`,
+or install `swiftbeaver.exe` on `PATH`.
+
+### Installation From Source
 
 ```bash
 # Clone the repository
@@ -82,9 +108,9 @@ which adds SwiftBeaver's `--gpu` flag.
 SwiftBeaverLodge requires the unified `swiftbeaver` CLI introduced in
 SwiftBeaver v0.5.1. It looks for the binary in this order:
 
-1. `<exe_dir>/bin/swiftbeaver` (alongside the Lodge binary)
-2. `./bin/swiftbeaver` (current working directory)
-3. `swiftbeaver` on `PATH`
+1. `<exe_dir>/bin/swiftbeaver` (or `swiftbeaver.exe` on Windows) alongside the Lodge binary
+2. `./bin/swiftbeaver` (or `swiftbeaver.exe` on Windows) in the current working directory
+3. `swiftbeaver` (or `swiftbeaver.exe`) on `PATH`
 
 The status bar shows the detected version. GPU acceleration is toggled via
 the `--gpu` flag.

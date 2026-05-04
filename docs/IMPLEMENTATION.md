@@ -31,14 +31,20 @@ SwiftBeaverLodge requires the unified `swiftbeaver` CLI introduced in
 SwiftBeaver v0.5.1. Discovery is centralized in `src/scan/mod.rs` and checks
 these locations in order:
 
-1. `<lodge_exe_dir>/bin/swiftbeaver`
-2. `./bin/swiftbeaver`
-3. `swiftbeaver` on `PATH`
+1. `<lodge_exe_dir>/bin/swiftbeaver` (or `swiftbeaver.exe` on Windows)
+2. `./bin/swiftbeaver` (or `swiftbeaver.exe` on Windows)
+3. `swiftbeaver` (or `swiftbeaver.exe`) on `PATH`
 
 The discovered binary is probed with `swiftbeaver --version`; versions older
 than v0.5.1 are rejected with an actionable compatibility message. GPU
 acceleration is not selected by changing binary names. Lodge passes `--gpu`
 when the GUI GPU option is enabled.
+
+Tagged SwiftBeaverLodge releases publish bundled Linux archives whose layout
+matches that discovery order: `swiftbeaverlodge` at the archive root and
+`bin/swiftbeaver` beside it. Windows bundles should use `swiftbeaverlodge.exe`
+and `bin/swiftbeaver.exe` once compatible upstream SwiftBeaver Windows release
+assets exist.
 
 The subprocess boundary is intentional:
 
