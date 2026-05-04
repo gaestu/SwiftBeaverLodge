@@ -207,7 +207,7 @@ impl Default for ScanManager {
 /// Run the scan in a background thread - completely non-blocking to UI
 fn run_scan_thread(args: Vec<String>, message_tx: Sender<ScanMessage>, cancel_rx: Receiver<()>) {
     let discovered = match discover_swiftbeaver().with_context(|| {
-        "swiftbeaver binary not found. Install SwiftBeaver v0.5.1+ on PATH, \
+        "swiftbeaver binary not found. Install SwiftBeaver v0.6.7+ on PATH, \
          or place the `swiftbeaver` binary in <exe_dir>/bin/ or ./bin/."
             .to_string()
     }) {
@@ -476,6 +476,9 @@ fn build_cli_args(config: &ScanConfig) -> Vec<String> {
     if !config.scan_phones {
         args.push("--no-scan-phones".to_string());
     }
+    if !config.scan_bitlocker_recovery {
+        args.push("--no-scan-bitlocker-recovery".to_string());
+    }
     if config.string_min_len > 0 && config.string_min_len != ScanConfig::default().string_min_len {
         args.push("--string-min-len".to_string());
         args.push(config.string_min_len.to_string());
@@ -689,6 +692,7 @@ mod tests {
             "--evidence-sha256",
             "--dry-run",
             "--metadata-only",
+            "--no-scan-bitlocker-recovery",
             "--validate-carved",
             "--remove-invalid",
             "--hash-algorithms",
@@ -724,6 +728,7 @@ mod tests {
             resume_from: Some("/var/tmp/run.ckpt".to_string()),
             dry_run: false,
             metadata_only: true,
+            scan_bitlocker_recovery: false,
             validate_carved: true,
             remove_invalid: true,
             hash_algorithms: vec!["md5".to_string(), "sha256".to_string()],
@@ -760,6 +765,7 @@ mod tests {
         );
         assert!(args.iter().any(|a| a == "--metadata-only"));
         assert!(!args.iter().any(|a| a == "--dry-run"));
+        assert!(args.iter().any(|a| a == "--no-scan-bitlocker-recovery"));
         assert!(args.iter().any(|a| a == "--validate-carved"));
         assert!(args.iter().any(|a| a == "--remove-invalid"));
         assert_eq!(flag_value(&args, "--hash-algorithms"), Some("md5,sha256"));

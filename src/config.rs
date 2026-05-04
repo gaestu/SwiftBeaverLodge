@@ -25,6 +25,8 @@ pub struct ScanConfig {
     pub scan_urls: bool,
     pub scan_emails: bool,
     pub scan_phones: bool,
+    #[serde(default = "default_true")]
+    pub scan_bitlocker_recovery: bool,
     pub scan_utf16: bool,
     pub string_min_len: usize,
 
@@ -133,6 +135,7 @@ impl Default for ScanConfig {
             scan_urls: true,
             scan_emails: true,
             scan_phones: true,
+            scan_bitlocker_recovery: true,
             scan_utf16: false,
             string_min_len: 8,
             gpu_enabled: false,
@@ -165,6 +168,10 @@ impl Default for ScanConfig {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Metadata output format
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetadataBackend {
@@ -186,7 +193,7 @@ impl MetadataBackend {
 /// Available file types for carving, grouped by category for the UI.
 ///
 /// Each tuple is `(category_name, icon, &[file_type])`. The file type strings
-/// are the exact identifiers accepted by SwiftBeaver v0.5.1's
+/// are the exact identifiers accepted by SwiftBeaver v0.6.7's
 /// `--types` / `--enable-types` flags. Adding a value here that SwiftBeaver
 /// does not recognise will cause `unknown file type in --types` warnings at
 /// runtime, so this catalog is kept aligned with the bundled binary.
@@ -218,7 +225,7 @@ pub const FILE_TYPES: &[(&str, &str, &[&str])] = &[
     (
         "Windows Artefacts",
         "🪟",
-        &["lnk", "prefetch", "registry", "evtx"],
+        &["lnk", "prefetch", "registry", "evtx", "bek"],
     ),
     ("Executables", "⚙", &["elf"]),
 ];
@@ -226,7 +233,7 @@ pub const FILE_TYPES: &[(&str, &str, &[&str])] = &[
 /// File types whose carving relies on the ZIP carver and are therefore
 /// skipped when SwiftBeaver is invoked with `--disable-zip`.
 ///
-/// SwiftBeaver v0.5.1 documents this as "skips zip/docx/xlsx/pptx" in its
+/// SwiftBeaver v0.6.7 documents this as "skips zip/docx/xlsx/pptx" in its
 /// `--disable-zip` help text. Other ZIP-structured formats (epub, odt, ods,
 /// odp) are not enumerated by upstream as `--disable-zip`-affected, so they
 /// are intentionally not included here.
@@ -375,9 +382,9 @@ mod tests {
     }
 
     /// Regression test for issue #3: ensure the catalog covers all
-    /// SwiftBeaver v0.5.1 carvers the issue requires us to expose.
+    /// SwiftBeaver v0.6.7 carvers the issue requires us to expose.
     #[test]
-    fn file_types_catalog_covers_v0_5_1_carvers() {
+    fn file_types_catalog_covers_v0_6_7_carvers() {
         let catalog = all_catalog_types();
         let required = [
             // Images
@@ -433,13 +440,14 @@ mod tests {
             "prefetch",
             "registry",
             "evtx",
+            "bek",
             // Executables
             "elf",
         ];
         for t in required {
             assert!(
                 catalog.contains(&t),
-                "FILE_TYPES catalog missing required v0.5.1 carver {t}"
+                "FILE_TYPES catalog missing required v0.6.7 carver {t}"
             );
         }
     }

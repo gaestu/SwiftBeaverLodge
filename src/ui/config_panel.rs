@@ -345,6 +345,10 @@ impl ConfigPanel {
                         ui.checkbox(&mut config.scan_urls, "Extract URLs");
                         ui.checkbox(&mut config.scan_emails, "Extract email addresses");
                         ui.checkbox(&mut config.scan_phones, "Extract phone numbers");
+                        ui.checkbox(
+                            &mut config.scan_bitlocker_recovery,
+                            "Detect BitLocker recovery passwords",
+                        );
                     });
                 });
             });

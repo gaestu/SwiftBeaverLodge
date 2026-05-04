@@ -244,7 +244,7 @@ impl eframe::App for SwiftBeaverApp {
                             None => {
                                 ui.colored_label(
                                     egui::Color32::RED,
-                                    "swiftbeaver: not installed (requires v0.5.1+)",
+                                    "swiftbeaver: not installed (requires v0.6.7+)",
                                 );
                             }
                         }

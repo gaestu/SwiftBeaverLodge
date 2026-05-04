@@ -24,7 +24,7 @@ A pure Rust desktop application for forensic file recovery using [egui](https://
 ### Prerequisites
 
 1. **Rust 1.70+** - Install from [rustup.rs](https://rustup.rs)
-2. **SwiftBeaver v0.5.1+** - Install the unified `swiftbeaver` CLI on your `PATH`
+2. **SwiftBeaver v0.6.7+** - Install the unified `swiftbeaver` CLI on your `PATH`
 
 ### Linux System Dependencies
 
@@ -49,9 +49,9 @@ sudo apt install libgtk-3-dev libglib2.0-dev libpango1.0-dev \
 git clone https://github.com/yourusername/SwiftBeaverLodge.git
 cd SwiftBeaverLodge
 
-# Install SwiftBeaver v0.5.1+ so `swiftbeaver` is on PATH
+# Install SwiftBeaver v0.6.7+ so `swiftbeaver` is on PATH
 # (e.g. via your distribution's package manager or the upstream installer)
-swiftbeaver --version   # should report >= 0.5.1
+swiftbeaver --version   # should report >= 0.6.7
 
 # Build
 cargo build --release
@@ -62,8 +62,8 @@ cargo build --release
 
 ## SwiftBeaver discovery
 
-SwiftBeaverLodge requires the unified `swiftbeaver` CLI introduced in
-SwiftBeaver v0.5.1. It looks for the binary in this order:
+SwiftBeaverLodge requires `swiftbeaver` v0.6.7 or newer. It looks for the
+binary in this order:
 
 1. `<exe_dir>/bin/swiftbeaver` (alongside the Lodge binary)
 2. `./bin/swiftbeaver` (current working directory)
@@ -74,7 +74,7 @@ the `--gpu` flag.
 
 | Binary Name | Notes |
 |-------------|-------|
-| `swiftbeaver` | v0.5.1+; GPU enabled via `--gpu` |
+| `swiftbeaver` | v0.6.7+; GPU enabled via `--gpu` |
 
 ## Screenshot
 
@@ -92,7 +92,7 @@ the `--gpu` flag.
 │  ● Idle        │  │ File Types: ☑ jpeg ☑ png ☑ pdf...    │  │
 │                │  └──────────────────────────────────────┘  │
 ├────────────────┴─────────────────────────────────────────────┤
-│  Ready                                  swiftbeaver: 0.5.1   │
+│  Ready                                  swiftbeaver: 0.6.7   │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -138,7 +138,7 @@ SwiftBeaverLodge/
 │       ├── progress_panel.rs
 │       └── results_panel.rs
 ├── bin/
-│   └── swiftbeaver            # Unified CLI (v0.5.1+)
+│   └── swiftbeaver            # Unified CLI (v0.6.7+)
 ├── tests/
 │   └── integration_tests.rs
 ├── Cargo.toml
@@ -154,13 +154,13 @@ SwiftBeaverLodge/
 | Output Directory | Where to save carved files | - |
 | File Types | Which file types to carve | Common types |
 | Metadata Format | parquet/jsonl/csv | parquet |
-| String Scanning | Extract URLs/emails/phones | enabled |
+| String Scanning | Extract URLs/emails/phones and BitLocker recovery passwords | enabled |
 | GPU Acceleration | Use GPU for faster scanning (`--gpu`) | disabled |
 | Evidence Hash | Compute SHA-256 of evidence | enabled |
 
 ### Supported file type categories
 
-The GUI exposes every carver shipped with SwiftBeaver v0.5.1, organised into
+The GUI exposes every carver shipped with SwiftBeaver v0.6.7, organised into
 the following categories (selectable individually or via the preset buttons
 **Select All / None / Images / Documents / Media / Windows Artefacts**):
 
@@ -172,7 +172,7 @@ the following categories (selectable individually or via the preset buttons
 | Archives | `zip`, `rar`, `7z`, `tar`, `gzip`, `bzip2`, `xz` |
 | Databases | `sqlite`, `sqlite_wal`, `sqlite_page` |
 | Media | `mp4`, `mov`, `avi`, `webm`, `wmv`, `mp3`, `wav`, `ogg` |
-| Windows Artefacts | `lnk`, `prefetch`, `registry`, `evtx` |
+| Windows Artefacts | `lnk`, `prefetch`, `registry`, `evtx`, `bek` |
 | Executables | `elf` |
 
 **ZIP-derived classifications.** `docx`, `xlsx`, and `pptx` are ZIP-based
@@ -180,7 +180,7 @@ office formats; together with raw `zip`, they are skipped when SwiftBeaver
 runs with **Disable ZIP carving** (`--disable-zip`). These entries are
 marked with `*` in the file-type list and surface a tooltip in the GUI.
 Other ZIP-structured formats such as `epub` and the OpenDocument types
-(`odt`, `ods`, `odp`) have their own dedicated carvers in v0.5.1 and are
+(`odt`, `ods`, `odp`) have their own dedicated carvers in v0.6.7 and are
 not affected by `--disable-zip`.
 
 > Carver names match SwiftBeaver's `--types` / `--enable-types` identifiers

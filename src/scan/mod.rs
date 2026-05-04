@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 pub use manager::ScanManager;
 pub use progress::{format_bytes, ScanProgress};
 
-/// Minimum supported SwiftBeaver version (single unified CLI introduced in 0.5.1).
-pub const MIN_SWIFTBEAVER_VERSION: (u32, u32, u32) = (0, 5, 1);
+/// Minimum supported SwiftBeaver version for the schemas and flags Lodge exposes.
+pub const MIN_SWIFTBEAVER_VERSION: (u32, u32, u32) = (0, 6, 7);
 
 /// Scan state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,7 +203,7 @@ fn find_named_binary(name: &str) -> Option<PathBuf> {
     which::which(name).ok()
 }
 
-/// Find the unified `swiftbeaver` CLI (v0.5.1+).
+/// Find the unified `swiftbeaver` CLI.
 pub fn find_swiftbeaver_binary() -> Option<PathBuf> {
     find_named_binary("swiftbeaver")
 }
@@ -323,25 +323,25 @@ mod tests {
 
     #[test]
     fn test_meets_minimum_version() {
-        assert!(meets_minimum_version((0, 5, 1)));
-        assert!(meets_minimum_version((0, 5, 2)));
+        assert!(meets_minimum_version((0, 6, 7)));
+        assert!(meets_minimum_version((0, 6, 8)));
         assert!(meets_minimum_version((1, 0, 0)));
-        assert!(!meets_minimum_version((0, 5, 0)));
-        assert!(!meets_minimum_version((0, 4, 99)));
+        assert!(!meets_minimum_version((0, 6, 6)));
+        assert!(!meets_minimum_version((0, 5, 99)));
     }
 
     #[test]
     fn test_compatibility_old_version_blocks() {
         let b = DiscoveredBinary {
             path: PathBuf::from("/tmp/swiftbeaver"),
-            version: Some((0, 4, 0)),
-            version_string: Some("swiftbeaver 0.4.0".to_string()),
+            version: Some((0, 6, 6)),
+            version_string: Some("swiftbeaver 0.6.6".to_string()),
         };
         assert!(b.check_compatibility().is_err());
         assert_eq!(
             b.check_compatibility(),
             Err(CompatibilityIssue::UnsupportedVersion {
-                detected: (0, 4, 0),
+                detected: (0, 6, 6),
                 minimum: MIN_SWIFTBEAVER_VERSION,
             })
         );
@@ -366,7 +366,7 @@ mod tests {
         let b = DiscoveredBinary {
             path: PathBuf::from("/tmp/swiftbeaver"),
             version: Some(MIN_SWIFTBEAVER_VERSION),
-            version_string: Some("swiftbeaver 0.5.1".to_string()),
+            version_string: Some("swiftbeaver 0.6.7".to_string()),
         };
         assert!(b.check_compatibility().is_ok());
     }
