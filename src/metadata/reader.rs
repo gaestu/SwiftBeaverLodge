@@ -31,10 +31,16 @@ impl MetadataReader {
 
     /// Create a new metadata reader for a run directory
     pub fn new(run_path: impl AsRef<Path>) -> Result<Self> {
-        let run_path = run_path.as_ref().to_path_buf();
+        let selected_path = run_path.as_ref();
+        let run_path = normalize_selected_run_path(selected_path);
 
         let backend = super::detect_metadata_backend(&run_path)
-            .context("No metadata found in run directory")?
+            .with_context(|| {
+                format!(
+                    "No metadata found in result directory: {}",
+                    selected_path.display()
+                )
+            })?
             .to_string();
 
         Ok(Self { run_path, backend })
@@ -1320,6 +1326,25 @@ fn parquet_scalar_to_string(array: &dyn Array, row_index: usize) -> Result<Optio
     )
 }
 
+fn normalize_selected_run_path(path: &Path) -> PathBuf {
+    if selected_backend_dir(path, "parquet") || selected_backend_dir(path, "metadata") {
+        if let Some(parent) = path.parent() {
+            return parent.to_path_buf();
+        }
+    }
+
+    path.to_path_buf()
+}
+
+fn selected_backend_dir(path: &Path, backend_dir: &str) -> bool {
+    path.is_dir()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name == backend_dir)
+            .unwrap_or(false)
+}
+
 fn parquet_string_field(
     batch: &RecordBatch,
     names: &[&str],
@@ -1980,6 +2005,40 @@ mod tests {
         assert_eq!(files[1].errors, vec!["truncated footer"]);
         assert!(files[1].is_duplicate);
         assert_eq!(files[1].duplicate_of_offset, Some(1024));
+    }
+
+    #[test]
+    fn test_reader_accepts_selected_parquet_directory() {
+        let temp = TempDir::new().unwrap();
+        let parquet_dir = temp.path().join("parquet");
+        fs::create_dir(&parquet_dir).unwrap();
+        write_v051_artefact_parquet(&parquet_dir.join("string_artefacts.parquet"));
+
+        let reader = MetadataReader::new(&parquet_dir).unwrap();
+        assert_eq!(reader.backend(), "parquet");
+
+        let strings = reader.read_string_artefacts().unwrap();
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].content, "https://example.test");
+    }
+
+    #[test]
+    fn test_reader_accepts_selected_metadata_directory() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.jsonl"),
+            r#"{"file_type":"jpeg","path":"1.jpg","global_start":0,"size":10}"#,
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(&metadata_dir).unwrap();
+        assert_eq!(reader.backend(), "jsonl");
+
+        let files = reader.read_carved_files().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "1.jpg");
     }
 
     #[test]
