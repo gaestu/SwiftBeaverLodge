@@ -1,5 +1,10 @@
 # SwiftBeaverLodge
 
+<div align="center">
+  <img src="logo.png" width="250" alt="SwiftBeaverLodge">
+</div>
+
+
 🦫 **GUI Frontend for SwiftBeaver Forensic File Carver**
 
 A pure Rust desktop application for forensic file recovery using [egui](https://github.com/emilk/egui). Provides a user-friendly interface for the [SwiftBeaver](https://github.com/gaestu/SwiftBeaver) file carving engine.
@@ -32,15 +37,18 @@ A pure Rust desktop application for forensic file recovery using [egui](https://
 ```bash
 sudo dnf install gtk3-devel glib2-devel pango-devel atk-devel \
                  gdk-pixbuf2-devel cairo-devel cairo-gobject-devel \
-                 libxkbcommon-devel wayland-devel
+                 libewf libxkbcommon-devel wayland-devel
 ```
 
 **Ubuntu/Debian:**
 ```bash
 sudo apt install libgtk-3-dev libglib2.0-dev libpango1.0-dev \
                  libatk1.0-dev libgdk-pixbuf2.0-dev libcairo2-dev \
-                 libxkbcommon-dev libwayland-dev
+                 libewf2 libxkbcommon-dev libwayland-dev
 ```
+ChatGPT Image May 5, 2026, 11_01_36 AM
+The bundled SwiftBeaver engine depends on `libewf.so.2`; on Ubuntu/Debian this
+is provided by `libewf2`.
 
 ### Release Downloads
 

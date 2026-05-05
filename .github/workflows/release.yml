@@ -54,7 +54,7 @@ jobs:
           echo "RELEASE_TAG=${release_tag}" >> "${GITHUB_ENV}"
           echo "tag=${release_tag}" >> "${GITHUB_OUTPUT}"
 
-      - name: Install Linux build dependencies
+      - name: Install Linux build and runtime dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -66,6 +66,7 @@ jobs:
             libatk1.0-dev \
             libgdk-pixbuf-2.0-dev \
             libcairo2-dev \
+            libewf2 \
             libxkbcommon-dev \
             libwayland-dev
 
