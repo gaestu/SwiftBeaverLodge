@@ -46,6 +46,8 @@ pub struct ResultsPanel {
     type_filter: Option<String>,
     /// Search query
     search_query: String,
+    /// Selected string artefact category
+    selected_string_category: StringArtefactCategory,
     /// Selected file index
     selected_file: Option<usize>,
     /// Error messages
@@ -78,6 +80,59 @@ enum ResultsTab {
 impl ResultsTab {
     fn supports_live_refresh(self) -> bool {
         matches!(self, Self::Overview | Self::Files | Self::Strings)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StringArtefactCategory {
+    #[default]
+    All,
+    Urls,
+    Emails,
+    Phones,
+    BitLocker,
+    Other,
+}
+
+impl StringArtefactCategory {
+    const ALL: [Self; 6] = [
+        Self::All,
+        Self::Urls,
+        Self::Emails,
+        Self::Phones,
+        Self::BitLocker,
+        Self::Other,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Urls => "URLs",
+            Self::Emails => "Emails",
+            Self::Phones => "Phones",
+            Self::BitLocker => "BitLocker",
+            Self::Other => "Other",
+        }
+    }
+
+    fn from_artefact_kind(kind: &str) -> Self {
+        let compact: String = kind
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+
+        match compact.as_str() {
+            "url" | "urls" => Self::Urls,
+            "email" | "emails" => Self::Emails,
+            "phone" | "phones" => Self::Phones,
+            "bitlocker" | "bitlockerrecoverypassword" => Self::BitLocker,
+            _ => Self::Other,
+        }
+    }
+
+    fn matches(self, artefact: &StringArtefact) -> bool {
+        self == Self::All || Self::from_artefact_kind(&artefact.artefact_kind) == self
     }
 }
 
@@ -117,6 +172,7 @@ impl ResultsPanel {
             current_tab: ResultsTab::Overview,
             type_filter: None,
             search_query: String::new(),
+            selected_string_category: StringArtefactCategory::All,
             selected_file: None,
             errors: Vec::new(),
             live_refresh_enabled: true,
@@ -199,6 +255,7 @@ impl ResultsPanel {
         self.available_tables = ResultTableAvailability::default();
         self.type_filter = None;
         self.search_query.clear();
+        self.selected_string_category = StringArtefactCategory::All;
         self.selected_file = None;
         self.errors.clear();
         self.clear_live_runtime_state();
@@ -364,7 +421,7 @@ impl ResultsPanel {
             ui.selectable_value(
                 &mut self.current_tab,
                 ResultsTab::Strings,
-                format!("Strings ({})", self.strings.len()),
+                format!("Text Artefacts ({})", self.strings.len()),
             );
             if self.available_tables.browser_history {
                 ui.selectable_value(
@@ -1041,7 +1098,17 @@ impl ResultsPanel {
             return;
         }
 
-        // Type filter
+        let category_counts = string_category_counts(&self.strings);
+        ui.horizontal_wrapped(|ui| {
+            for category in StringArtefactCategory::ALL {
+                ui.selectable_value(
+                    &mut self.selected_string_category,
+                    category,
+                    format!("{} ({})", category.label(), category_counts.count(category)),
+                );
+            }
+        });
+
         ui.horizontal(|ui| {
             ui.label("Filter:");
             ui.text_edit_singleline(&mut self.search_query);
@@ -1049,24 +1116,17 @@ impl ResultsPanel {
 
         ui.separator();
 
-        // Filtered strings
-        let filtered: Vec<_> = self
-            .strings
-            .iter()
-            .filter(|s| {
-                if !self.search_query.is_empty() {
-                    return s
-                        .content
-                        .to_lowercase()
-                        .contains(&self.search_query.to_lowercase());
-                }
-                true
-            })
-            .collect();
+        let category_total = category_counts.count(self.selected_string_category);
+        let filtered = filter_string_artefacts(
+            &self.strings,
+            self.selected_string_category,
+            &self.search_query,
+        );
 
         ui.label(format!(
-            "Showing {} of {} artefacts",
+            "Showing {} of {} artefacts ({} total loaded)",
             filtered.len(),
+            category_total,
             self.strings.len()
         ));
 
@@ -1088,7 +1148,7 @@ impl ResultsPanel {
                         ui.label(RichText::new("Content").strong());
                         ui.end_row();
 
-                        // Strings
+                        // Artefacts
                         for artefact in filtered.iter().take(500) {
                             ui.label(&artefact.artefact_kind);
                             ui.label(format!("0x{:X}", artefact.global_start));
@@ -1119,6 +1179,65 @@ impl ResultsPanel {
                     });
             });
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StringCategoryCounts {
+    all: usize,
+    urls: usize,
+    emails: usize,
+    phones: usize,
+    bitlocker: usize,
+    other: usize,
+}
+
+impl StringCategoryCounts {
+    fn count(self, category: StringArtefactCategory) -> usize {
+        match category {
+            StringArtefactCategory::All => self.all,
+            StringArtefactCategory::Urls => self.urls,
+            StringArtefactCategory::Emails => self.emails,
+            StringArtefactCategory::Phones => self.phones,
+            StringArtefactCategory::BitLocker => self.bitlocker,
+            StringArtefactCategory::Other => self.other,
+        }
+    }
+}
+
+fn string_category_counts(strings: &[StringArtefact]) -> StringCategoryCounts {
+    let mut counts = StringCategoryCounts {
+        all: strings.len(),
+        ..Default::default()
+    };
+
+    for artefact in strings {
+        match StringArtefactCategory::from_artefact_kind(&artefact.artefact_kind) {
+            StringArtefactCategory::All => {}
+            StringArtefactCategory::Urls => counts.urls += 1,
+            StringArtefactCategory::Emails => counts.emails += 1,
+            StringArtefactCategory::Phones => counts.phones += 1,
+            StringArtefactCategory::BitLocker => counts.bitlocker += 1,
+            StringArtefactCategory::Other => counts.other += 1,
+        }
+    }
+
+    counts
+}
+
+fn filter_string_artefacts<'a>(
+    strings: &'a [StringArtefact],
+    category: StringArtefactCategory,
+    search_query: &str,
+) -> Vec<&'a StringArtefact> {
+    let query = search_query.to_lowercase();
+
+    strings
+        .iter()
+        .filter(|artefact| {
+            category.matches(artefact)
+                && (query.is_empty() || artefact.content.to_lowercase().contains(&query))
+        })
+        .collect()
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -1337,9 +1456,9 @@ mod tests {
         }
     }
 
-    fn sample_string(content: &str) -> StringArtefact {
+    fn sample_string_kind(kind: &str, content: &str) -> StringArtefact {
         StringArtefact {
-            artefact_kind: "email".to_string(),
+            artefact_kind: kind.to_string(),
             content: content.to_string(),
             global_start: 10,
             global_end: Some(20),
@@ -1348,6 +1467,10 @@ mod tests {
             source: None,
             run_id: None,
         }
+    }
+
+    fn sample_string(content: &str) -> StringArtefact {
+        sample_string_kind("email", content)
     }
 
     fn temp_jsonl_reader() -> (tempfile::TempDir, String, MetadataReader) {
@@ -1372,9 +1495,26 @@ mod tests {
     fn test_results_panel_clear() {
         let mut panel = ResultsPanel::new();
         panel.files.push(sample_file(1, "test.jpg"));
+        panel.search_query = "needle".to_string();
+        panel.selected_string_category = StringArtefactCategory::Phones;
 
         panel.clear();
         assert!(panel.files.is_empty());
+        assert!(panel.search_query.is_empty());
+        assert_eq!(panel.selected_string_category, StringArtefactCategory::All);
+    }
+
+    #[test]
+    fn test_results_panel_load_resets_selected_string_category() {
+        let (_temp, run_path, _reader) = temp_jsonl_reader();
+        let mut panel = ResultsPanel::new();
+        panel.selected_string_category = StringArtefactCategory::Emails;
+        panel.search_query = "case".to_string();
+
+        panel.load(&run_path);
+
+        assert_eq!(panel.selected_string_category, StringArtefactCategory::All);
+        assert!(panel.search_query.is_empty());
     }
 
     #[test]
@@ -1422,6 +1562,91 @@ mod tests {
         assert_eq!(panel.files.len(), 1);
         assert_eq!(panel.strings.len(), 1);
         assert_eq!(panel.summary.as_ref().unwrap().string_artefacts, 1);
+    }
+
+    #[test]
+    fn test_live_refresh_preserves_selected_string_category() {
+        let (_temp, run_path, reader) = temp_jsonl_reader();
+        let mut panel = ResultsPanel::new();
+        panel.run_path = Some(run_path.clone());
+        panel.selected_string_category = StringArtefactCategory::Urls;
+
+        panel.apply_live_refresh_result(LiveRefreshResult {
+            run_path,
+            result: Ok(LiveSnapshot {
+                reader,
+                files: Vec::new(),
+                strings: vec![sample_string_kind("url", "https://example.test")],
+            }),
+        });
+
+        assert_eq!(panel.selected_string_category, StringArtefactCategory::Urls);
+    }
+
+    #[test]
+    fn test_string_artefact_category_bucketing() {
+        assert_eq!(
+            StringArtefactCategory::from_artefact_kind("url"),
+            StringArtefactCategory::Urls
+        );
+        assert_eq!(
+            StringArtefactCategory::from_artefact_kind("email"),
+            StringArtefactCategory::Emails
+        );
+        assert_eq!(
+            StringArtefactCategory::from_artefact_kind("phone"),
+            StringArtefactCategory::Phones
+        );
+        assert_eq!(
+            StringArtefactCategory::from_artefact_kind("BitlockerRecoveryPassword"),
+            StringArtefactCategory::BitLocker
+        );
+        assert_eq!(
+            StringArtefactCategory::from_artefact_kind("string"),
+            StringArtefactCategory::Other
+        );
+    }
+
+    #[test]
+    fn test_string_category_counts_include_legacy_as_other() {
+        let strings = vec![
+            sample_string_kind("url", "https://example.test"),
+            sample_string_kind("email", "a@example.test"),
+            sample_string_kind("phone", "+14155552671"),
+            sample_string_kind(
+                "bitlocker_recovery_password",
+                "000000-000000-000000-000000-000000-000000-000000-000000",
+            ),
+            sample_string_kind("string", "legacy string"),
+        ];
+
+        let counts = string_category_counts(&strings);
+
+        assert_eq!(counts.count(StringArtefactCategory::All), 5);
+        assert_eq!(counts.count(StringArtefactCategory::Urls), 1);
+        assert_eq!(counts.count(StringArtefactCategory::Emails), 1);
+        assert_eq!(counts.count(StringArtefactCategory::Phones), 1);
+        assert_eq!(counts.count(StringArtefactCategory::BitLocker), 1);
+        assert_eq!(counts.count(StringArtefactCategory::Other), 1);
+    }
+
+    #[test]
+    fn test_string_category_filter_combines_with_search() {
+        let strings = vec![
+            sample_string_kind("url", "https://example.test/login"),
+            sample_string_kind("url", "https://case.test/report"),
+            sample_string_kind("email", "case@example.test"),
+            sample_string_kind("string", "case legacy token"),
+        ];
+
+        let filtered = filter_string_artefacts(&strings, StringArtefactCategory::Urls, "case");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].content, "https://case.test/report");
+
+        let other = filter_string_artefacts(&strings, StringArtefactCategory::Other, "case");
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].content, "case legacy token");
     }
 
     #[test]

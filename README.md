@@ -181,12 +181,14 @@ SwiftBeaverLodge supports the metadata backends exposed by SwiftBeaver v0.5.1:
 | JSONL | Supported fallback; enables live refresh while SwiftBeaver appends complete JSONL rows |
 | CSV | Supported for carved-file metadata in current builds (added after issue #7) |
 
-The Results view includes tabs for overview metrics, carved files, string
+The Results view includes tabs for overview metrics, carved files, text
 artefacts, browser history/cookies/downloads, Windows artefacts, and entropy
-regions when the corresponding SwiftBeaver metadata tables exist. During an
-active scan, live refresh is limited to Overview, Files, and Strings because
-JSONL can be read safely while it is being appended; Parquet and CSV are loaded
-after SwiftBeaver finalizes the run.
+regions when the corresponding SwiftBeaver metadata tables exist. Text
+artefacts can be browsed by category inside the tab, including URLs, emails,
+phones, BitLocker recovery passwords, and other legacy/general strings. During
+an active scan, live refresh is limited to Overview, Files, and Text Artefacts
+because JSONL can be read safely while it is being appended; Parquet and CSV
+are loaded after SwiftBeaver finalizes the run.
 
 ### Raw Device Scanning
 
