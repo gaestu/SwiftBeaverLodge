@@ -4,7 +4,6 @@
   <img src="logo.png" width="250" alt="SwiftBeaverLodge">
 </div>
 
-
 🦫 **GUI Frontend for SwiftBeaver Forensic File Carver**
 
 A pure Rust desktop application for forensic file recovery using [egui](https://github.com/emilk/egui). Provides a user-friendly interface for the [SwiftBeaver](https://github.com/gaestu/SwiftBeaver) file carving engine.
