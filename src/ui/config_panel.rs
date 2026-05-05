@@ -4,8 +4,8 @@ use egui::{Color32, RichText, Ui};
 use rfd::FileDialog;
 
 use crate::config::{
-    validate_flag_combinations, MetadataBackend, ScanConfig, FILE_TYPES, SUPPORTED_HASH_ALGORITHMS,
-    ZIP_DERIVED_TYPES,
+    hash_algorithms_include_sha256, validate_flag_combinations, MetadataBackend, ScanConfig,
+    FILE_TYPES, SUPPORTED_HASH_ALGORITHMS, ZIP_DERIVED_TYPES,
 };
 use crate::devices::{list_block_devices, BlockDevice, DeviceType};
 
@@ -15,6 +15,24 @@ fn set_preset(config: &mut ScanConfig, category: &str) {
     if let Some((_, _, types)) = FILE_TYPES.iter().find(|(c, _, _)| *c == category) {
         config.file_types = types.iter().map(|t| (*t).to_string()).collect();
     }
+}
+
+fn ensure_dedupe_hashing(config: &mut ScanConfig) {
+    if config.dedupe
+        && !config.hash_algorithms.is_empty()
+        && !hash_algorithms_include_sha256(&config.hash_algorithms)
+    {
+        config.hash_algorithms.push("sha256".to_string());
+    }
+}
+
+fn sha256_hash_checkbox_locked(config: &ScanConfig, algorithm: &str) -> bool {
+    config.dedupe
+        && algorithm.eq_ignore_ascii_case("sha256")
+        && config
+            .hash_algorithms
+            .iter()
+            .any(|selected| !selected.eq_ignore_ascii_case("sha256"))
 }
 
 /// Input source type
@@ -240,7 +258,7 @@ impl ConfigPanel {
 
             // File types (organized by category)
             ui.group(|ui| {
-                ui.label(RichText::new("File Types to Carve").strong());
+                ui.label(RichText::new("File Type Filters").strong());
                 ui.add_space(5.0);
 
                 ui.horizontal_wrapped(|ui| {
@@ -444,6 +462,14 @@ impl ConfigPanel {
                 // Chunk overlap
                 ui.label(RichText::new("Chunking").strong());
                 ui.horizontal(|ui| {
+                    ui.label("Chunk size (MiB):");
+                    ui.add(
+                        egui::DragValue::new(&mut config.chunk_size_mib)
+                            .speed(1)
+                            .range(1..=4096),
+                    );
+                });
+                ui.horizontal(|ui| {
                     ui.label("Overlap (KiB):");
                     let mut has_overlap = config.overlap_kib.is_some();
                     if ui.checkbox(&mut has_overlap, "").changed() {
@@ -453,6 +479,12 @@ impl ConfigPanel {
                         ui.add(egui::DragValue::new(v).speed(1).range(0..=4096));
                     }
                 });
+                ui.label(
+                    RichText::new(
+                        "Resumed scans must use the same chunk size and overlap as the checkpointed scan.",
+                    )
+                    .weak(),
+                );
                 ui.horizontal(|ui| {
                     ui.label("Max chunks:");
                     let mut has = config.max_chunks.is_some();
@@ -536,34 +568,76 @@ impl ConfigPanel {
                         && config.metadata_only
                     {
                         config.dry_run = false;
+                        config.validate_carved = false;
+                        config.remove_invalid = false;
                     }
                 });
+                let run_mode_note = if config.dry_run {
+                    "Dry run scans and counts only; SwiftBeaver output files are not written, so file validation and duplicate-body skipping are not used."
+                } else if config.metadata_only {
+                    "Metadata-only mode writes metadata records but does not write carved file bodies; validation/removal and duplicate-body skipping are disabled."
+                } else {
+                    "Normal mode writes carved files and metadata records to the run output directory."
+                };
+                ui.label(RichText::new(run_mode_note).weak());
 
                 ui.add_space(10.0);
 
                 // Validation & dedup
                 ui.label(RichText::new("Validation & dedup").strong());
-                ui.checkbox(
-                    &mut config.validate_carved,
-                    "Validate carved files (file magic check)",
-                );
+                let writes_carved_files = !config.dry_run && !config.metadata_only;
+                ui.add_enabled_ui(writes_carved_files, |ui| {
+                    ui.checkbox(
+                        &mut config.validate_carved,
+                        "Validate carved files (file magic check)",
+                    );
+                });
                 ui.add_enabled_ui(config.validate_carved, |ui| {
                     ui.indent("validate_opts", |ui| {
-                        ui.checkbox(&mut config.remove_invalid, "Remove invalid files");
+                        ui.checkbox(
+                            &mut config.remove_invalid,
+                            "Remove invalid files after validation",
+                        );
                     });
                 });
+                if !writes_carved_files {
+                    config.validate_carved = false;
+                    config.remove_invalid = false;
+                }
                 if !config.validate_carved && config.remove_invalid {
                     config.remove_invalid = false;
                 }
 
-                ui.checkbox(&mut config.dedupe, "Track duplicates in metadata");
+                if ui
+                    .checkbox(&mut config.dedupe, "Track duplicates in metadata")
+                    .changed()
+                {
+                    ensure_dedupe_hashing(config);
+                }
                 ui.add_enabled_ui(config.dedupe, |ui| {
                     ui.indent("dedupe_opts", |ui| {
-                        ui.checkbox(&mut config.skip_duplicates, "Skip writing duplicate files");
+                        ui.add_enabled_ui(writes_carved_files, |ui| {
+                            ui.checkbox(
+                                &mut config.skip_duplicates,
+                                "Skip writing duplicate file bodies",
+                            );
+                        });
+                        if !writes_carved_files {
+                            config.skip_duplicates = false;
+                        }
                     });
                 });
                 if !config.dedupe && config.skip_duplicates {
                     config.skip_duplicates = false;
+                }
+
+                if config.skip_duplicates {
+                    ui.label(
+                        RichText::new(
+                            "Duplicate records remain in metadata; duplicate file bodies are skipped.",
+                        )
+                        .weak(),
+                    );
                 }
 
                 ui.horizontal(|ui| {
@@ -573,16 +647,28 @@ impl ConfigPanel {
                             .hash_algorithms
                             .iter()
                             .any(|a| a.eq_ignore_ascii_case(algo));
-                        if ui.checkbox(&mut on, *algo).changed() {
+                        let sha256_locked = sha256_hash_checkbox_locked(config, algo);
+                        let response = ui.add_enabled(
+                            !sha256_locked,
+                            egui::Checkbox::new(&mut on, *algo),
+                        );
+                        if response.changed() {
                             config
                                 .hash_algorithms
                                 .retain(|a| !a.eq_ignore_ascii_case(algo));
                             if on {
                                 config.hash_algorithms.push((*algo).to_string());
                             }
+                            ensure_dedupe_hashing(config);
                         }
                     }
                 });
+                if config.dedupe {
+                    ui.label(
+                        RichText::new("Deduplication uses SHA-256; it is kept enabled when hashes are explicitly selected.")
+                            .weak(),
+                    );
+                }
 
                 ui.add_space(10.0);
 
@@ -626,6 +712,22 @@ impl ConfigPanel {
                         }
                     }
                 });
+                let resume_active = config
+                    .resume_from
+                    .as_ref()
+                    .is_some_and(|path| !path.is_empty());
+                if resume_active {
+                    ui.colored_label(
+                        Color32::YELLOW,
+                        "Resume mode active: this scan will continue from the selected checkpoint.",
+                    );
+                }
+                ui.label(
+                    RichText::new(
+                        "Checkpoint files are written by SwiftBeaver during early exit. Resume only with matching chunk size and overlap.",
+                    )
+                    .weak(),
+                );
 
                 ui.add_space(10.0);
 
@@ -652,6 +754,16 @@ impl ConfigPanel {
                         }
                     }
                 });
+                if config
+                    .config_path
+                    .as_ref()
+                    .is_some_and(|path| !path.is_empty())
+                {
+                    ui.colored_label(
+                        Color32::YELLOW,
+                        "SwiftBeaver YAML config active: Lodge GUI options are passed as CLI flags and override matching YAML values.",
+                    );
+                }
 
                 ui.add_space(10.0);
 
@@ -692,8 +804,8 @@ impl ConfigPanel {
     }
 }
 
-/// Validate configuration and return issues
-fn validate_config(config: &ScanConfig) -> Vec<String> {
+/// Validate configuration and return issues.
+pub(crate) fn validate_config(config: &ScanConfig) -> Vec<String> {
     let mut issues = Vec::new();
 
     if config.input_path.is_empty() {
@@ -710,6 +822,29 @@ fn validate_config(config: &ScanConfig) -> Vec<String> {
         issues.push("At least one file type must be selected".to_string());
     }
 
+    if let Some(path) = config.config_path.as_ref() {
+        if path.is_empty() {
+            issues.push("SwiftBeaver YAML config path is required when enabled".to_string());
+        } else if !std::path::Path::new(path).is_file() {
+            issues.push("SwiftBeaver YAML config file does not exist".to_string());
+        }
+    }
+
+    if let Some(path) = config.resume_from.as_ref().filter(|p| !p.is_empty()) {
+        if !std::path::Path::new(path).is_file() {
+            issues.push("Resume checkpoint file does not exist".to_string());
+        }
+    }
+
+    if let Some(path) = config.checkpoint_path.as_ref().filter(|p| !p.is_empty()) {
+        let checkpoint_path = std::path::Path::new(path);
+        if let Some(parent) = checkpoint_path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                issues.push("Checkpoint directory does not exist".to_string());
+            }
+        }
+    }
+
     issues.extend(validate_flag_combinations(config));
 
     issues
@@ -718,6 +853,15 @@ fn validate_config(config: &ScanConfig) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_config_with_input(input_path: String) -> ScanConfig {
+        ScanConfig {
+            input_path,
+            output_path: "/tmp/output".to_string(),
+            file_types: vec!["jpeg".to_string()],
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_validate_empty_config() {
@@ -734,14 +878,118 @@ mod tests {
 
     #[test]
     fn test_validate_valid_config() {
-        let config = ScanConfig {
-            input_path: "/tmp".to_string(), // exists on most systems
-            output_path: "/tmp/output".to_string(),
-            file_types: vec!["jpeg".to_string()],
-            ..Default::default()
-        };
+        let config = valid_config_with_input("/tmp".to_string()); // exists on most systems
 
         let issues = validate_config(&config);
         assert!(issues.is_empty() || issues.len() == 1); // May not exist
+    }
+
+    #[test]
+    fn validate_config_requires_yaml_path_when_enabled() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        let mut config = valid_config_with_input(input.path().display().to_string());
+        config.config_path = Some(String::new());
+
+        let issues = validate_config(&config);
+
+        assert!(issues
+            .iter()
+            .any(|issue| issue == "SwiftBeaver YAML config path is required when enabled"));
+    }
+
+    #[test]
+    fn validate_config_rejects_missing_yaml_config_file() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = valid_config_with_input(input.path().display().to_string());
+        config.config_path = Some(temp.path().join("missing.yaml").display().to_string());
+
+        let issues = validate_config(&config);
+
+        assert!(issues
+            .iter()
+            .any(|issue| issue == "SwiftBeaver YAML config file does not exist"));
+    }
+
+    #[test]
+    fn validate_config_accepts_existing_yaml_config_file() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        let yaml = tempfile::NamedTempFile::new().unwrap();
+        let mut config = valid_config_with_input(input.path().display().to_string());
+        config.config_path = Some(yaml.path().display().to_string());
+
+        let issues = validate_config(&config);
+
+        assert!(
+            issues.is_empty(),
+            "unexpected validation issues: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_dedupe_hashing_adds_sha256_for_explicit_hash_selection() {
+        let mut config = ScanConfig {
+            dedupe: true,
+            hash_algorithms: vec!["md5".to_string()],
+            ..Default::default()
+        };
+
+        ensure_dedupe_hashing(&mut config);
+
+        assert!(config
+            .hash_algorithms
+            .iter()
+            .any(|algo| algo.eq_ignore_ascii_case("sha256")));
+    }
+
+    #[test]
+    fn ensure_dedupe_hashing_leaves_default_hash_selection_unset() {
+        let mut config = ScanConfig {
+            dedupe: true,
+            hash_algorithms: Vec::new(),
+            ..Default::default()
+        };
+
+        ensure_dedupe_hashing(&mut config);
+
+        assert!(config.hash_algorithms.is_empty());
+    }
+
+    #[test]
+    fn ensure_dedupe_hashing_is_idempotent_when_sha256_already_selected() {
+        let mut config = ScanConfig {
+            dedupe: true,
+            hash_algorithms: vec!["md5".to_string(), "sha256".to_string()],
+            ..Default::default()
+        };
+
+        ensure_dedupe_hashing(&mut config);
+
+        assert_eq!(
+            config
+                .hash_algorithms
+                .iter()
+                .filter(|algo| algo.eq_ignore_ascii_case("sha256"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn sha256_hash_checkbox_lock_allows_return_to_default_hashes() {
+        let only_sha256 = ScanConfig {
+            dedupe: true,
+            hash_algorithms: vec!["sha256".to_string()],
+            ..Default::default()
+        };
+        assert!(!sha256_hash_checkbox_locked(&only_sha256, "sha256"));
+
+        let md5_and_sha256 = ScanConfig {
+            dedupe: true,
+            hash_algorithms: vec!["md5".to_string(), "sha256".to_string()],
+            ..Default::default()
+        };
+        assert!(sha256_hash_checkbox_locked(&md5_and_sha256, "sha256"));
+        assert!(!sha256_hash_checkbox_locked(&md5_and_sha256, "md5"));
     }
 }

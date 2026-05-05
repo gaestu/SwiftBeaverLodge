@@ -169,15 +169,31 @@ fn read_version_output(path: &Path) -> Option<String> {
     }
 }
 
-/// Pure helper: return the first `<dir>/<name>` that exists on disk.
+/// Return candidate file names for a logical executable name on a platform.
+fn binary_name_candidates(name: &str, windows: bool) -> Vec<String> {
+    if windows && !name.to_ascii_lowercase().ends_with(".exe") {
+        vec![format!("{name}.exe"), name.to_string()]
+    } else {
+        vec![name.to_string()]
+    }
+}
+
+/// Pure helper: return the first platform-specific `<dir>/<name>` that exists on disk.
 ///
 /// Factored out so tests can exercise the search order without mutating
 /// process-global state (PATH, current_exe, cwd).
 fn find_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    find_in_dirs_for_platform(name, dirs, cfg!(windows))
+}
+
+fn find_in_dirs_for_platform(name: &str, dirs: &[PathBuf], windows: bool) -> Option<PathBuf> {
+    let names = binary_name_candidates(name, windows);
     for dir in dirs {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Some(candidate);
+        for candidate_name in &names {
+            let candidate = dir.join(candidate_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
     }
     None
@@ -388,6 +404,36 @@ mod tests {
         let target1 = dir1.join("swiftbeaver");
         std::fs::write(&target1, b"#!/bin/sh\n").unwrap();
         assert_eq!(find_in_dirs("swiftbeaver", &[dir1, dir2]), Some(target1));
+    }
+
+    #[test]
+    fn test_binary_name_candidates_prefer_windows_exe() {
+        assert_eq!(
+            binary_name_candidates("swiftbeaver", true),
+            vec!["swiftbeaver.exe".to_string(), "swiftbeaver".to_string()]
+        );
+        assert_eq!(
+            binary_name_candidates("swiftbeaver.exe", true),
+            vec!["swiftbeaver.exe".to_string()]
+        );
+        assert_eq!(
+            binary_name_candidates("swiftbeaver", false),
+            vec!["swiftbeaver".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_find_in_dirs_supports_windows_exe_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("swiftbeaver.exe");
+        std::fs::write(&target, b"fake exe").unwrap();
+
+        assert_eq!(
+            find_in_dirs_for_platform("swiftbeaver", &[dir], true),
+            Some(target)
+        );
     }
 
     #[test]

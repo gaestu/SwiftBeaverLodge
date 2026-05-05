@@ -1,0 +1,3 @@
+run_id,tool_version,config_hash,evidence_sha256,handler_id,file_type,carved_path,extension,global_start,global_end,size,md5,sha256,validated,truncated,error,pattern_id,is_duplicate,duplicate_of_offset,mime_type,width,height
+20260428T140203Z_09e96cdf,0.5.1,cfg-test,evidence-sha,jpeg,jpeg,jpeg/jpeg_000000000400.jpg,jpg,1024,1056,32,md5-a,sha-a,false,true,short footer,jpeg_soi,true,512,image/jpeg,16,16
+20260428T140203Z_09e96cdf,0.5.1,cfg-test,evidence-sha,png,png,png/png_000000000800.png,png,2048,4096,2048,,sha-b,true,false,,png_sig,false,,image/png,64,32

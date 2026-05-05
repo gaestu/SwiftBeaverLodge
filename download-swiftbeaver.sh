@@ -1,139 +1,137 @@
-#!/bin/bash
-# Download swiftbeaver binaries from SwiftBeaver releases
-# Downloads all GPU variants: cpu-only, opencl, cuda
+#!/usr/bin/env bash
+# Convenience installer for the SwiftBeaver CLI used by SwiftBeaverLodge.
+#
+# SwiftBeaverLodge discovers a single executable named `swiftbeaver`. Upstream
+# SwiftBeaver v0.5.1 release archives are still packaged by build flavor, but
+# this helper installs the chosen archive as ./bin/swiftbeaver.
 
-set -e
+set -euo pipefail
 
-VERSION="v0.3.0"
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m)
+VERSION="${SWIFTBEAVER_VERSION:-v0.5.1}"
+FLAVOR="${1:-cpu-only}"
+REPO="gaestu/SwiftBeaver"
 
-# Map architecture
-case "$ARCH" in
-    x86_64)
-        ARCH="x86_64"
+usage() {
+    cat <<USAGE
+Usage: $0 [cpu-only|opencl|cuda]
+
+Downloads SwiftBeaver ${VERSION} for Linux x86_64 and installs it as:
+  ./bin/swiftbeaver
+
+Environment:
+  SWIFTBEAVER_VERSION   Release tag to download (default: v0.5.1)
+
+Notes:
+  SwiftBeaverLodge requires swiftbeaver v0.5.1+ and only discovers a binary
+  named "swiftbeaver". GPU acceleration is enabled in Lodge with SwiftBeaver's
+  --gpu flag; Lodge no longer selects swiftbeaver-<flavor> binaries.
+USAGE
+}
+
+case "${FLAVOR}" in
+    cpu-only|opencl|cuda)
         ;;
-    aarch64|arm64)
-        ARCH="aarch64"
+    -h|--help)
+        usage
+        exit 0
         ;;
     *)
-        echo "Unsupported architecture: $ARCH"
+        echo "Unsupported SwiftBeaver release flavor: ${FLAVOR}" >&2
+        usage >&2
         exit 1
         ;;
 esac
 
-# Map OS to filename format
-case "$OS" in
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+
+case "${OS}" in
     linux)
         OS_NAME="linux"
         ;;
-    darwin)
-        OS_NAME="macos"
-        ;;
     *)
-        echo "Unsupported OS: $OS"
+        echo "No ${VERSION} prebuilt SwiftBeaver artifact is documented for OS: ${OS}" >&2
+        echo "Install swiftbeaver v0.5.1+ on PATH manually, or place it at ./bin/swiftbeaver." >&2
         exit 1
         ;;
 esac
 
-# All variants to download
-VARIANTS=("cpu-only" "opencl" "cuda")
+case "${ARCH}" in
+    x86_64|amd64)
+        ARCH_NAME="x86_64"
+        ;;
+    *)
+        echo "No ${VERSION} prebuilt SwiftBeaver artifact is documented for architecture: ${ARCH}" >&2
+        echo "Install swiftbeaver v0.5.1+ on PATH manually, or place it at ./bin/swiftbeaver." >&2
+        exit 1
+        ;;
+esac
 
-# Check if user wants only specific variant
-if [ -n "$1" ]; then
-    case "$1" in
-        cpu-only|opencl|cuda)
-            VARIANTS=("$1")
-            ;;
-        all)
-            # Keep all variants
-            ;;
-        *)
-            echo "Invalid variant: $1"
-            echo "Usage: $0 [cpu-only|opencl|cuda|all]"
-            echo ""
-            echo "Available variants:"
-            echo "  cpu-only  - CPU-only build, no GPU support"
-            echo "  opencl    - OpenCL GPU support (NVIDIA/AMD/Intel)"
-            echo "  cuda      - CUDA GPU support (NVIDIA only, best performance)"
-            echo "  all       - Download all variants (default)"
-            exit 1
-            ;;
-    esac
-fi
+FILENAME="swiftbeaver-${OS_NAME}-${ARCH_NAME}-${FLAVOR}.tar.gz"
+BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+URL="${BASE_URL}/${FILENAME}"
+SUMS_URL="${BASE_URL}/SHA256SUMS"
+TMP_DIR="$(mktemp -d)"
 
-echo "╔════════════════════════════════════════════════════════╗"
-echo "║           SwiftBeaver Binary Downloader                ║"
-echo "╠════════════════════════════════════════════════════════╣"
-echo "║  Version:  ${VERSION}                                       ║"
-echo "║  Platform: ${OS_NAME}-${ARCH}$(printf '%*s' $((10 - ${#OS_NAME})) '')                        ║"
-echo "║  Variants: ${VARIANTS[*]}$(printf '%*s' $((24 - ${#VARIANTS[*]})) '')              ║"
-echo "╚════════════════════════════════════════════════════════╝"
-echo ""
+cleanup() {
+    rm -rf "${TMP_DIR}"
+}
+trap cleanup EXIT
 
-# Create bin directory
-mkdir -p bin
+download() {
+    local url="$1"
+    local output="$2"
 
-# Download each variant
-for VARIANT in "${VARIANTS[@]}"; do
-    FILENAME="swiftbeaver-${OS_NAME}-${ARCH}-${VARIANT}.tar.gz"
-    URL="https://github.com/gaestu/SwiftBeaver/releases/download/${VERSION}/${FILENAME}"
-    BINARY_NAME="swiftbeaver-${VARIANT}"
-    
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📥 Downloading ${VARIANT} variant..."
-    echo "   URL: ${URL}"
-    
-    # Download
-    if command -v curl &> /dev/null; then
-        curl -L -o /tmp/${FILENAME} "${URL}" 2>&1
-    elif command -v wget &> /dev/null; then
-        wget -O /tmp/${FILENAME} "${URL}" 2>&1
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 -o "${output}" "${url}"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "${output}" "${url}"
     else
-        echo "Neither curl nor wget found. Please install one of them."
+        echo "Neither curl nor wget found. Please install one of them." >&2
         exit 1
     fi
-    
-    # Extract to temp, then rename
-    echo "📦 Extracting..."
-    tar -xzf /tmp/${FILENAME} -C /tmp/
-    mv /tmp/swiftbeaver bin/${BINARY_NAME}
-    chmod +x bin/${BINARY_NAME}
-    
-    # Verify
-    echo "✅ Verifying ${BINARY_NAME}..."
-    ./bin/${BINARY_NAME} --version
-    
-    # Cleanup
-    rm -f /tmp/${FILENAME}
-    echo ""
-done
+}
 
-# Create default symlink to cpu-only (safest default)
-if [ -f "bin/swiftbeaver-cpu-only" ]; then
-    ln -sf swiftbeaver-cpu-only bin/swiftbeaver
-    echo "🔗 Created symlink: swiftbeaver → swiftbeaver-cpu-only"
+echo "SwiftBeaver CLI installer"
+echo "  Release: ${VERSION}"
+echo "  Package: ${FILENAME}"
+echo "  Target:  ./bin/swiftbeaver"
+echo
+
+download "${URL}" "${TMP_DIR}/${FILENAME}"
+
+if command -v sha256sum >/dev/null 2>&1; then
+    if download "${SUMS_URL}" "${TMP_DIR}/SHA256SUMS"; then
+        if grep -E "[[:space:]]${FILENAME}$" "${TMP_DIR}/SHA256SUMS" >"${TMP_DIR}/SHA256SUMS.selected"; then
+            (cd "${TMP_DIR}" && sha256sum -c SHA256SUMS.selected)
+        else
+            echo "Warning: ${FILENAME} not found in SHA256SUMS; skipping checksum verification." >&2
+        fi
+    else
+        echo "Warning: could not download SHA256SUMS; skipping checksum verification." >&2
+    fi
+else
+    echo "Warning: sha256sum not found; skipping checksum verification." >&2
 fi
 
-# List installed variants
-echo ""
-echo "╔════════════════════════════════════════════════════════╗"
-echo "║  ✅ Installation Complete!                             ║"
-echo "╠════════════════════════════════════════════════════════╣"
-echo "║  Installed binaries:                                   ║"
-for VARIANT in "${VARIANTS[@]}"; do
-    printf "║    • bin/swiftbeaver-%-10s                       ║\n" "${VARIANT}"
-done
-echo "║                                                        ║"
-echo "║  Select variant in SwiftBeaverLodge UI or run:         ║"
-echo "║    ./bin/swiftbeaver-<variant> --version               ║"
-echo "║                                                        ║"
-echo "║  You can now run: cargo run                            ║"
-echo "╚════════════════════════════════════════════════════════╝"
+mkdir -p "${TMP_DIR}/extract" bin
+tar -xzf "${TMP_DIR}/${FILENAME}" -C "${TMP_DIR}/extract"
 
-# GPU-specific hints
-echo ""
-echo "💡 GPU Requirements:"
-echo "   • opencl: Install OpenCL runtime (ocl-icd-opencl-dev)"
-echo "   • cuda:   NVIDIA GPU with CUDA 12.x runtime"
-echo "   Use --gpu flag to enable GPU acceleration"
+BINARY_PATH="$(find "${TMP_DIR}/extract" -type f -name swiftbeaver -perm /111 | head -n 1)"
+if [[ -z "${BINARY_PATH}" ]]; then
+    BINARY_PATH="$(find "${TMP_DIR}/extract" -type f -name swiftbeaver | head -n 1)"
+fi
+
+if [[ -z "${BINARY_PATH}" ]]; then
+    echo "Archive did not contain a swiftbeaver executable." >&2
+    exit 1
+fi
+
+cp "${BINARY_PATH}" bin/swiftbeaver
+chmod 0755 bin/swiftbeaver
+
+echo
+echo "Installed ./bin/swiftbeaver"
+./bin/swiftbeaver --version
+echo
+echo "SwiftBeaverLodge will discover this binary when run from the repository root."

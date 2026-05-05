@@ -1,0 +1,2 @@
+{"run_id":"20260428T140203Z_09e96cdf","artefact_kind":"email","content":"case@example.test","global_start":20,"global_end":37,"encoding":"utf8","source":"chunk-1"}
+{"run_id":"20260428T140203Z_09e96cdf","artefact_kind":"url","content":"https://example.test/case","global_start":48,"length":25,"encoding":"utf8","source":"chunk-1"}

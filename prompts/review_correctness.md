@@ -10,7 +10,7 @@ Check for:
 
 - wrong scan state transitions or stale UI state
 - incorrect `ScanConfig` to CLI argument mapping
-- mismatches between GPU variant selection, binary discovery, and `--gpu` behavior
+- mismatches between unified binary discovery, GPU configuration, and `--gpu` behavior
 - failure to preserve run output paths reported by SwiftBeaver
 - broken progress/log parsing for current `fields.message` JSON or supported legacy formats
 - incorrect cancellation behavior or process lifecycle handling

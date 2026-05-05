@@ -1,24 +1,34 @@
-//! Metadata reader for Parquet and JSONL files
+//! Metadata reader for Parquet, JSONL, and CSV files
 
-use std::collections::HashMap;
-use std::fs::File;
+use std::collections::{BTreeMap, HashSet};
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use arrow::array::{Array, BooleanArray, Int64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{
+    Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    LargeStringArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+};
+use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use serde_json::Value;
+use serde::Deserialize;
 
-use super::types::{CarvedFile, MetadataSummary, StringArtefact};
+use super::types::{
+    CarvedFile, MetadataRecord, ResultTableAvailability, RunSummary, StringArtefact,
+};
 
 /// Reader for scan metadata
+#[derive(Clone)]
 pub struct MetadataReader {
     run_path: PathBuf,
     backend: String,
 }
 
 impl MetadataReader {
+    pub const LIVE_REFRESH_UNSUPPORTED_BACKEND: &'static str =
+        "Live refresh is available only with JSONL metadata";
+
     /// Create a new metadata reader for a run directory
     pub fn new(run_path: impl AsRef<Path>) -> Result<Self> {
         let run_path = run_path.as_ref().to_path_buf();
@@ -46,10 +56,37 @@ impl MetadataReader {
         }
     }
 
+    /// Read carved files for live UI refreshes.
+    ///
+    /// JSONL metadata can be observed while SwiftBeaver is appending a record.
+    /// Ignore one trailing unterminated partial line and keep all complete rows.
+    /// Other backends are finalized too late for incremental live refresh.
+    pub fn read_live_carved_files(&self) -> Result<Vec<CarvedFile>> {
+        match self.backend.as_str() {
+            "jsonl" => self.read_carved_files_jsonl_live(),
+            backend => bail!(
+                "{} (detected {backend})",
+                Self::LIVE_REFRESH_UNSUPPORTED_BACKEND
+            ),
+        }
+    }
+
+    /// Read string artefacts for live UI refreshes.
+    pub fn read_live_string_artefacts(&self) -> Result<Vec<StringArtefact>> {
+        match self.backend.as_str() {
+            "jsonl" => self.read_string_artefacts_jsonl_live(),
+            backend => bail!(
+                "{} (detected {backend})",
+                Self::LIVE_REFRESH_UNSUPPORTED_BACKEND
+            ),
+        }
+    }
+
     /// Read carved files from Parquet
     fn read_carved_files_parquet(&self) -> Result<Vec<CarvedFile>> {
         let parquet_dir = self.run_path.join("parquet");
         let mut all_files = Vec::new();
+        let mut next_id: u64 = 0;
 
         // Read all files_*.parquet files
         for entry in std::fs::read_dir(&parquet_dir)? {
@@ -63,7 +100,7 @@ impl MetadataReader {
                     .map(|n| n.starts_with("files_"))
                     .unwrap_or(false)
             {
-                let files = self.read_parquet_file(&path)?;
+                let files = self.read_parquet_file(&path, &mut next_id)?;
                 all_files.extend(files);
             }
         }
@@ -72,78 +109,64 @@ impl MetadataReader {
     }
 
     /// Read a single Parquet file
-    fn read_parquet_file(&self, path: &Path) -> Result<Vec<CarvedFile>> {
+    fn read_parquet_file(&self, path: &Path, next_id: &mut u64) -> Result<Vec<CarvedFile>> {
         let file = File::open(path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
 
         let mut files = Vec::new();
-        let mut next_id: u64 = 0;
 
         for batch_result in reader {
             let batch = batch_result?;
 
-            // Get column arrays - use actual fastcarve column names
-            let type_col = batch
-                .column_by_name("file_type")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch
-                .column_by_name("global_start")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let size_col = batch
-                .column_by_name("size")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let output_col = batch
-                .column_by_name("carved_path")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let sha256_col = batch
-                .column_by_name("sha256")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let valid_col = batch
-                .column_by_name("validated")
-                .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
-            let width_col = batch
-                .column_by_name("width")
-                .and_then(|c| c.as_any().downcast_ref::<UInt32Array>());
-            let height_col = batch
-                .column_by_name("height")
-                .and_then(|c| c.as_any().downcast_ref::<UInt32Array>());
-
             for i in 0..batch.num_rows() {
-                let file =
-                    CarvedFile {
-                        id: next_id,
-                        file_type: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
-                        offset: offset_col.map(|c| c.value(i) as u64).unwrap_or(0),
-                        size: size_col.map(|c| c.value(i) as u64).unwrap_or(0),
-                        output_path: output_col
-                            .map(|c| c.value(i).to_string())
-                            .unwrap_or_default(),
-                        sha256: sha256_col.and_then(|c| {
-                            if c.is_null(i) {
-                                None
-                            } else {
-                                Some(c.value(i).to_string())
-                            }
-                        }),
-                        is_valid: valid_col.map(|c| c.value(i)).unwrap_or(true),
-                        mime_type: None,
-                        width: width_col.and_then(|c| {
-                            if c.is_null(i) {
-                                None
-                            } else {
-                                Some(c.value(i))
-                            }
-                        }),
-                        height: height_col.and_then(|c| {
-                            if c.is_null(i) {
-                                None
-                            } else {
-                                Some(c.value(i))
-                            }
-                        }),
-                    };
+                let id = parquet_u64_field(&batch, &["id"], i)?.unwrap_or(*next_id);
+                let global_start =
+                    parquet_u64_field(&batch, &["global_start", "offset", "start"], i)?
+                        .unwrap_or(0);
+                let size = parquet_u64_field(&batch, &["size", "length"], i)?.unwrap_or(0);
+                let global_end = parquet_u64_field(&batch, &["global_end", "end"], i)?.unwrap_or(
+                    global_start.checked_add(size).with_context(|| {
+                        format!("Parquet row {i} global_start + size overflowed")
+                    })?,
+                );
+                let path = parquet_string_field(
+                    &batch,
+                    &["carved_path", "path", "output_path", "filename"],
+                    i,
+                )?
+                .unwrap_or_default();
+                let error = parquet_string_field(&batch, &["error", "errors"], i)?;
+                let validated = parquet_bool_field(&batch, &["validated", "is_valid"], i)?;
+
+                let file = CarvedFile {
+                    id,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
+                    file_type: parquet_string_field(&batch, &["file_type", "type"], i)?
+                        .unwrap_or_default(),
+                    extension: parquet_string_field(&batch, &["extension"], i)?
+                        .or_else(|| extension_from_path(&path)),
+                    global_start,
+                    global_end,
+                    size,
+                    path,
+                    handler_id: parquet_string_field(&batch, &["handler_id"], i)?,
+                    md5: parquet_string_field(&batch, &["md5"], i)?,
+                    sha256: parquet_string_field(&batch, &["sha256", "sha256_hex"], i)?,
+                    validated,
+                    truncated: parquet_bool_field(&batch, &["truncated"], i)?.unwrap_or(false),
+                    errors: error_values(error),
+                    pattern_id: parquet_string_field(&batch, &["pattern_id"], i)?,
+                    is_duplicate: parquet_bool_field(&batch, &["is_duplicate"], i)?
+                        .unwrap_or(false),
+                    duplicate_of_offset: parquet_u64_field(&batch, &["duplicate_of_offset"], i)?,
+                    mime_type: parquet_string_field(&batch, &["mime_type", "mime"], i)?,
+                    width: parquet_u32_field(&batch, &["width"], i)?,
+                    height: parquet_u32_field(&batch, &["height"], i)?,
+                };
                 files.push(file);
-                next_id += 1;
+                *next_id = next_id
+                    .checked_add(1)
+                    .context("Exhausted Parquet fallback id space")?;
             }
         }
 
@@ -157,22 +180,49 @@ impl MetadataReader {
         let reader = BufReader::new(file);
 
         let mut files = Vec::new();
-        let mut next_id = 0u64;
 
-        for (line_no, line) in reader.lines().enumerate() {
+        for (line_index, line) in reader.lines().enumerate() {
             let line = line?;
             if line.is_empty() {
                 continue;
             }
 
-            let value: Value = serde_json::from_str(&line).with_context(|| {
-                format!("Failed to parse carved-file metadata row {}", line_no + 1)
+            let row: JsonCarvedFileRow = serde_json::from_str(&line).with_context(|| {
+                format!("Failed to parse carved_files.jsonl line {}", line_index + 1)
             })?;
-            let file = Self::carved_file_from_json(&value, next_id).with_context(|| {
-                format!("Failed to parse carved-file metadata row {}", line_no + 1)
-            })?;
-            files.push(file);
-            next_id += 1;
+            files.push(row.into_carved_file(line_index as u64)?);
+        }
+
+        Ok(files)
+    }
+
+    fn read_carved_files_jsonl_live(&self) -> Result<Vec<CarvedFile>> {
+        let jsonl_path = self.run_path.join("metadata").join("carved_files.jsonl");
+        let data = fs::read_to_string(&jsonl_path)?;
+        let has_trailing_newline = data.ends_with('\n') || data.ends_with('\r');
+        let lines: Vec<_> = data.lines().collect();
+
+        let mut files = Vec::new();
+        for (line_index, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<JsonCarvedFileRow>(line) {
+                Ok(row) => files.push(row.into_carved_file(line_index as u64)?),
+                Err(error) if !has_trailing_newline && line_index + 1 == lines.len() => {
+                    tracing::debug!(
+                        error = ?error,
+                        line = line_index + 1,
+                        "Ignoring trailing partial carved_files.jsonl row during live refresh"
+                    );
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Failed to parse carved_files.jsonl line {}", line_index + 1)
+                    });
+                }
+            }
         }
 
         Ok(files)
@@ -181,28 +231,91 @@ impl MetadataReader {
     /// Read carved files from CSV
     fn read_carved_files_csv(&self) -> Result<Vec<CarvedFile>> {
         let csv_path = self.run_path.join("metadata").join("carved_files.csv");
+        let mut reader = csv::Reader::from_path(&csv_path)
+            .with_context(|| "Failed to open CSV carved file metadata")?;
+        let headers = reader
+            .headers()
+            .with_context(|| "Failed to read CSV carved file headers")?
+            .clone();
+
         let mut files = Vec::new();
+        let mut explicit_ids = HashSet::new();
+        let mut missing_id_indexes = Vec::new();
 
-        for_each_csv_row(&csv_path, |idx, row| {
-            let start = csv_u64(row, &["offset", "global_start"]).unwrap_or(0);
-            let end = csv_u64(row, &["global_end"]);
-            let size = csv_u64(row, &["size"]).or_else(|| end.map(|e| e.saturating_sub(start)));
+        for (row_index, record) in reader.records().enumerate() {
+            let record = record
+                .with_context(|| format!("Failed to read CSV carved file row {}", row_index + 1))?;
+            let id = match csv_u64_field(&headers, &record, &["id"])? {
+                Some(id) => {
+                    explicit_ids.insert(id);
+                    id
+                }
+                None => {
+                    missing_id_indexes.push(files.len());
+                    0
+                }
+            };
+            let global_start =
+                csv_u64_field(&headers, &record, &["global_start", "offset", "start"])?
+                    .unwrap_or(0);
+            let size = csv_u64_field(&headers, &record, &["size", "length"])?.unwrap_or(0);
+            let global_end = csv_u64_field(&headers, &record, &["global_end", "end"])?.unwrap_or(
+                global_start.checked_add(size).with_context(|| {
+                    format!(
+                        "CSV carved file row {} global_start + size overflowed",
+                        row_index + 1
+                    )
+                })?,
+            );
+            let path = csv_string_field(
+                &headers,
+                &record,
+                &["path", "carved_path", "output_path", "filename"],
+            );
+            let errors = error_values(csv_optional_string_field(
+                &headers,
+                &record,
+                &["errors", "error"],
+            ));
 
-            files.push(CarvedFile {
-                id: csv_u64(row, &["id"]).unwrap_or(idx as u64),
-                file_type: csv_string(row, &["file_type"]).unwrap_or_default(),
-                offset: start,
-                size: size.unwrap_or(0),
-                output_path: csv_string(row, &["output_path", "carved_path", "path"])
-                    .unwrap_or_default(),
-                sha256: csv_string(row, &["sha256"]),
-                is_valid: csv_bool(row, &["is_valid", "validated"]).unwrap_or(true),
-                mime_type: csv_string(row, &["mime_type"]),
-                width: csv_u64(row, &["width"]).and_then(|v| u32::try_from(v).ok()),
-                height: csv_u64(row, &["height"]).and_then(|v| u32::try_from(v).ok()),
-            });
-            Ok(())
-        })?;
+            let validated = csv_bool_field(&headers, &record, &["validated", "is_valid"])?;
+
+            let file = CarvedFile {
+                id,
+                run_id: csv_optional_string_field(&headers, &record, &["run_id"]),
+                file_type: csv_string_field(&headers, &record, &["file_type", "type"]),
+                path,
+                extension: csv_optional_string_field(&headers, &record, &["extension"]),
+                global_start,
+                global_end,
+                size,
+                handler_id: csv_optional_string_field(&headers, &record, &["handler_id"]),
+                md5: csv_optional_string_field(&headers, &record, &["md5"]),
+                sha256: csv_optional_string_field(&headers, &record, &["sha256", "sha256_hex"]),
+                validated,
+                truncated: csv_bool_field(&headers, &record, &["truncated"])?.unwrap_or(false),
+                errors,
+                pattern_id: csv_optional_string_field(&headers, &record, &["pattern_id"]),
+                is_duplicate: csv_bool_field(&headers, &record, &["is_duplicate"])?
+                    .unwrap_or(false),
+                duplicate_of_offset: csv_u64_field(&headers, &record, &["duplicate_of_offset"])?,
+                mime_type: csv_optional_string_field(&headers, &record, &["mime_type", "mime"]),
+                width: csv_u32_field(&headers, &record, &["width"])?,
+                height: csv_u32_field(&headers, &record, &["height"])?,
+            };
+            files.push(file);
+        }
+
+        for index in missing_id_indexes {
+            let mut generated_id = index as u64;
+            while explicit_ids.contains(&generated_id) {
+                generated_id = generated_id
+                    .checked_add(1)
+                    .context("Exhausted CSV fallback id space")?;
+            }
+            files[index].id = generated_id;
+            explicit_ids.insert(generated_id);
+        }
 
         Ok(files)
     }
@@ -217,9 +330,60 @@ impl MetadataReader {
         }
     }
 
+    /// Read the run summary if SwiftBeaver emitted one.
+    pub fn read_run_summary(&self) -> Result<Option<RunSummary>> {
+        let mut records = self.read_table_records("run_summary")?;
+        Ok(records.pop().map(RunSummary::from_record))
+    }
+
+    /// Read browser history artefacts.
+    pub fn read_browser_history(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("browser_history")
+    }
+
+    /// Read browser cookie artefacts.
+    pub fn read_browser_cookies(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("browser_cookies")
+    }
+
+    /// Read browser download artefacts.
+    pub fn read_browser_downloads(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("browser_downloads")
+    }
+
+    /// Read Windows artefacts.
+    pub fn read_windows_artefacts(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("windows_artefacts")
+    }
+
+    /// Read entropy regions.
+    pub fn read_entropy_regions(&self) -> Result<Vec<MetadataRecord>> {
+        self.read_table_records("entropy_regions")
+    }
+
+    /// Check which optional result tables exist without reading their rows.
+    pub fn result_table_availability(&self) -> Result<ResultTableAvailability> {
+        Ok(ResultTableAvailability {
+            browser_history: self.table_exists("browser_history")?,
+            browser_cookies: self.table_exists("browser_cookies")?,
+            browser_downloads: self.table_exists("browser_downloads")?,
+            windows_artefacts: self.table_exists("windows_artefacts")?,
+            entropy_regions: self.table_exists("entropy_regions")?,
+        })
+    }
+
     /// Read string artefacts from Parquet
     fn read_string_artefacts_parquet(&self) -> Result<Vec<StringArtefact>> {
         let parquet_dir = self.run_path.join("parquet");
+        let unified_artefacts = self
+            .read_parquet_records_for_stem("string_artefacts")?
+            .into_iter()
+            .map(|record| string_artefact_from_record(record, None))
+            .collect::<Result<Vec<_>>>()?;
+        if !unified_artefacts.is_empty() {
+            return Ok(unified_artefacts);
+        }
+
         let mut all_artefacts = Vec::new();
 
         // Read URLs
@@ -267,21 +431,23 @@ impl MetadataReader {
             let url_col = batch
                 .column_by_name("url")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch
-                .column_by_name("global_start")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let end_col = batch
-                .column_by_name("global_end")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-
             for i in 0..batch.num_rows() {
-                let offset = offset_col.map(|c| c.value(i) as u64).unwrap_or(0);
-                let end = end_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let offset =
+                    parquet_u64_field(&batch, &["global_start", "offset"], i)?.unwrap_or(0);
+                let end = parquet_u64_field(&batch, &["global_end", "end"], i)?.unwrap_or(0);
                 let artefact = StringArtefact {
-                    artefact_type: "url".to_string(),
-                    value: url_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
-                    offset,
-                    length: end.saturating_sub(offset),
+                    artefact_kind: "url".to_string(),
+                    content: url_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    global_start: offset,
+                    global_end: Some(end),
+                    length: parquet_span_length("URL", i, offset, end)?,
+                    encoding: parquet_string_field(&batch, &["encoding", "source_encoding"], i)?,
+                    source: parquet_string_field(
+                        &batch,
+                        &["source", "source_path", "source_file"],
+                        i,
+                    )?,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
                 };
                 artefacts.push(artefact);
             }
@@ -303,23 +469,25 @@ impl MetadataReader {
             let email_col = batch
                 .column_by_name("email")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch
-                .column_by_name("global_start")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let end_col = batch
-                .column_by_name("global_end")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-
             for i in 0..batch.num_rows() {
-                let offset = offset_col.map(|c| c.value(i) as u64).unwrap_or(0);
-                let end = end_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let offset =
+                    parquet_u64_field(&batch, &["global_start", "offset"], i)?.unwrap_or(0);
+                let end = parquet_u64_field(&batch, &["global_end", "end"], i)?.unwrap_or(0);
                 let artefact = StringArtefact {
-                    artefact_type: "email".to_string(),
-                    value: email_col
+                    artefact_kind: "email".to_string(),
+                    content: email_col
                         .map(|c| c.value(i).to_string())
                         .unwrap_or_default(),
-                    offset,
-                    length: end.saturating_sub(offset),
+                    global_start: offset,
+                    global_end: Some(end),
+                    length: parquet_span_length("email", i, offset, end)?,
+                    encoding: parquet_string_field(&batch, &["encoding", "source_encoding"], i)?,
+                    source: parquet_string_field(
+                        &batch,
+                        &["source", "source_path", "source_file"],
+                        i,
+                    )?,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
                 };
                 artefacts.push(artefact);
             }
@@ -340,27 +508,29 @@ impl MetadataReader {
 
             let phone_col = batch
                 .column_by_name("phone_e164")
-                .or_else(|| batch.column_by_name("phone_raw"))
                 .or_else(|| batch.column_by_name("phone"))
+                .or_else(|| batch.column_by_name("phone_raw"))
                 .or_else(|| batch.column_by_name("number"))
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch
-                .column_by_name("global_start")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let end_col = batch
-                .column_by_name("global_end")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-
             for i in 0..batch.num_rows() {
-                let offset = offset_col.map(|c| c.value(i) as u64).unwrap_or(0);
-                let end = end_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let offset =
+                    parquet_u64_field(&batch, &["global_start", "offset"], i)?.unwrap_or(0);
+                let end = parquet_u64_field(&batch, &["global_end", "end"], i)?.unwrap_or(0);
                 let artefact = StringArtefact {
-                    artefact_type: "phone".to_string(),
-                    value: phone_col
+                    artefact_kind: "phone".to_string(),
+                    content: phone_col
                         .map(|c| c.value(i).to_string())
                         .unwrap_or_default(),
-                    offset,
-                    length: end.saturating_sub(offset),
+                    global_start: offset,
+                    global_end: Some(end),
+                    length: parquet_span_length("phone", i, offset, end)?,
+                    encoding: parquet_string_field(&batch, &["encoding", "source_encoding"], i)?,
+                    source: parquet_string_field(
+                        &batch,
+                        &["source", "source_path", "source_file"],
+                        i,
+                    )?,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
                 };
                 artefacts.push(artefact);
             }
@@ -382,24 +552,27 @@ impl MetadataReader {
             let password_col = batch
                 .column_by_name("recovery_password")
                 .or_else(|| batch.column_by_name("content"))
+                .or_else(|| batch.column_by_name("value"))
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let offset_col = batch
-                .column_by_name("global_start")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let end_col = batch
-                .column_by_name("global_end")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-
             for i in 0..batch.num_rows() {
-                let offset = offset_col.map(|c| c.value(i) as u64).unwrap_or(0);
-                let end = end_col.map(|c| c.value(i) as u64).unwrap_or(0);
+                let offset =
+                    parquet_u64_field(&batch, &["global_start", "offset"], i)?.unwrap_or(0);
+                let end = parquet_u64_field(&batch, &["global_end", "end"], i)?.unwrap_or(0);
                 let artefact = StringArtefact {
-                    artefact_type: "bitlocker_recovery_password".to_string(),
-                    value: password_col
+                    artefact_kind: "bitlocker_recovery_password".to_string(),
+                    content: password_col
                         .map(|c| c.value(i).to_string())
                         .unwrap_or_default(),
-                    offset,
-                    length: end.saturating_sub(offset),
+                    global_start: offset,
+                    global_end: Some(end),
+                    length: parquet_span_length("BitLocker recovery", i, offset, end)?,
+                    encoding: parquet_string_field(&batch, &["encoding", "source_encoding"], i)?,
+                    source: parquet_string_field(
+                        &batch,
+                        &["source", "source_path", "source_file"],
+                        i,
+                    )?,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
                 };
                 artefacts.push(artefact);
             }
@@ -434,12 +607,20 @@ impl MetadataReader {
 
             for i in 0..batch.num_rows() {
                 let artefact = StringArtefact {
-                    artefact_type: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
-                    value: value_col
+                    artefact_kind: type_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
+                    content: value_col
                         .map(|c| c.value(i).to_string())
                         .unwrap_or_default(),
-                    offset: offset_col.map(|c| c.value(i)).unwrap_or(0),
+                    global_start: offset_col.map(|c| c.value(i)).unwrap_or(0),
+                    global_end: None,
                     length: length_col.map(|c| c.value(i)).unwrap_or(0),
+                    encoding: parquet_string_field(&batch, &["encoding", "source_encoding"], i)?,
+                    source: parquet_string_field(
+                        &batch,
+                        &["source", "source_path", "source_file"],
+                        i,
+                    )?,
+                    run_id: parquet_string_field(&batch, &["run_id"], i)?,
                 };
                 artefacts.push(artefact);
             }
@@ -448,17 +629,20 @@ impl MetadataReader {
         Ok(artefacts)
     }
 
+    fn jsonl_string_artefacts_path(&self) -> PathBuf {
+        let metadata_dir = self.run_path.join("metadata");
+        let jsonl_path = metadata_dir.join("string_artefacts.jsonl");
+        let legacy_jsonl_path = metadata_dir.join("strings.jsonl");
+        if jsonl_path.exists() {
+            jsonl_path
+        } else {
+            legacy_jsonl_path
+        }
+    }
+
     /// Read string artefacts from JSONL
     fn read_string_artefacts_jsonl(&self) -> Result<Vec<StringArtefact>> {
-        let metadata_dir = self.run_path.join("metadata");
-        let jsonl_path = {
-            let current = metadata_dir.join("string_artefacts.jsonl");
-            if current.exists() {
-                current
-            } else {
-                metadata_dir.join("strings.jsonl")
-            }
-        };
+        let jsonl_path = self.jsonl_string_artefacts_path();
 
         if !jsonl_path.exists() {
             return Ok(Vec::new());
@@ -469,17 +653,64 @@ impl MetadataReader {
 
         let mut artefacts = Vec::new();
 
-        for (line_no, line) in reader.lines().enumerate() {
+        for (line_index, line) in reader.lines().enumerate() {
             let line = line?;
             if line.is_empty() {
                 continue;
             }
 
-            let value: Value = serde_json::from_str(&line)
-                .with_context(|| format!("Failed to parse string artefact row {}", line_no + 1))?;
-            let artefact = Self::string_artefact_from_json(&value)
-                .with_context(|| format!("Failed to parse string artefact row {}", line_no + 1))?;
-            artefacts.push(artefact);
+            let artefact: JsonStringArtefactRow =
+                serde_json::from_str(&line).with_context(|| {
+                    format!(
+                        "Failed to parse {} line {}",
+                        metadata_file_name(&jsonl_path),
+                        line_index + 1
+                    )
+                })?;
+            artefacts.push(artefact.into_string_artefact(&jsonl_path, line_index + 1)?);
+        }
+
+        Ok(artefacts)
+    }
+
+    fn read_string_artefacts_jsonl_live(&self) -> Result<Vec<StringArtefact>> {
+        let jsonl_path = self.jsonl_string_artefacts_path();
+
+        if !jsonl_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let data = fs::read_to_string(&jsonl_path)?;
+        let has_trailing_newline = data.ends_with('\n') || data.ends_with('\r');
+        let lines: Vec<_> = data.lines().collect();
+
+        let mut artefacts = Vec::new();
+        for (line_index, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<JsonStringArtefactRow>(line) {
+                Ok(row) => {
+                    artefacts.push(row.into_string_artefact(&jsonl_path, line_index + 1)?);
+                }
+                Err(error) if !has_trailing_newline && line_index + 1 == lines.len() => {
+                    tracing::debug!(
+                        error = ?error,
+                        line = line_index + 1,
+                        "Ignoring trailing partial string artefact JSONL row during live refresh"
+                    );
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Failed to parse {} line {}",
+                            metadata_file_name(&jsonl_path),
+                            line_index + 1
+                        )
+                    });
+                }
+            }
         }
 
         Ok(artefacts)
@@ -487,301 +718,517 @@ impl MetadataReader {
 
     /// Read string artefacts from CSV
     fn read_string_artefacts_csv(&self) -> Result<Vec<StringArtefact>> {
-        let csv_path = self.run_path.join("metadata").join("string_artefacts.csv");
+        let metadata_dir = self.run_path.join("metadata");
+        let unified_artefacts = self
+            .read_csv_records(&metadata_dir.join("string_artefacts.csv"))?
+            .into_iter()
+            .map(|record| string_artefact_from_record(record, None))
+            .collect::<Result<Vec<_>>>()?;
+        if !unified_artefacts.is_empty() {
+            return Ok(unified_artefacts);
+        }
 
-        if !csv_path.exists() {
+        let mut all_artefacts = Vec::new();
+        all_artefacts.extend(self.read_named_csv_artefacts(
+            &metadata_dir.join("artefacts_urls.csv"),
+            "url",
+            &["url", "value"],
+        )?);
+        all_artefacts.extend(self.read_named_csv_artefacts(
+            &metadata_dir.join("artefacts_emails.csv"),
+            "email",
+            &["email", "value"],
+        )?);
+        all_artefacts.extend(self.read_named_csv_artefacts(
+            &metadata_dir.join("artefacts_phones.csv"),
+            "phone",
+            &["phone_e164", "phone", "phone_raw", "number", "value"],
+        )?);
+        all_artefacts.extend(self.read_named_csv_artefacts(
+            &metadata_dir.join("artefacts_bitlocker_recovery_passwords.csv"),
+            "bitlocker_recovery_password",
+            &["recovery_password", "content", "value"],
+        )?);
+        all_artefacts.extend(self.read_csv_artefacts(&metadata_dir.join("strings.csv"))?);
+
+        Ok(all_artefacts)
+    }
+
+    fn read_named_csv_artefacts(
+        &self,
+        path: &Path,
+        artefact_type: &str,
+        value_columns: &[&str],
+    ) -> Result<Vec<StringArtefact>> {
+        if !path.exists() {
             return Ok(Vec::new());
         }
 
+        self.read_csv_artefact_file(path, Some(artefact_type), value_columns)
+    }
+
+    fn read_csv_artefacts(&self, path: &Path) -> Result<Vec<StringArtefact>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        self.read_csv_artefact_file(path, None, &["value", "string"])
+    }
+
+    fn read_csv_artefact_file(
+        &self,
+        path: &Path,
+        fixed_type: Option<&str>,
+        value_columns: &[&str],
+    ) -> Result<Vec<StringArtefact>> {
+        let mut reader = csv::Reader::from_path(path)
+            .with_context(|| "Failed to open CSV string artefact metadata")?;
+        let headers = reader
+            .headers()
+            .with_context(|| "Failed to read CSV string artefact headers")?
+            .clone();
+
         let mut artefacts = Vec::new();
 
-        for_each_csv_row(&csv_path, |_idx, row| {
-            let raw_type = csv_string(row, &["artefact_type", "artefact_kind"])
-                .unwrap_or_else(|| "string".to_string());
-            let artefact_type = normalize_artefact_type(&raw_type);
-            let start = csv_u64(row, &["offset", "global_start"]).unwrap_or(0);
-            let end = csv_u64(row, &["global_end"]);
-            let length = csv_u64(row, &["length"]).or_else(|| end.map(|e| e.saturating_sub(start)));
-            let value_keys: &[&str] = match artefact_type.as_str() {
-                "phone" => &["phone_e164", "value", "content", "phone_raw"],
-                "bitlocker_recovery_password" => &["recovery_password", "value", "content"],
-                _ => &["value", "content", "url", "email"],
+        for (row_index, record) in reader.records().enumerate() {
+            let record = record.with_context(|| {
+                format!("Failed to read CSV string artefact row {}", row_index + 1)
+            })?;
+            let offset = csv_u64_field(&headers, &record, &["offset", "global_start", "start"])?
+                .unwrap_or(0);
+            let end = csv_u64_field(&headers, &record, &["global_end", "end"])?;
+            let length = match csv_u64_field(&headers, &record, &["length"])? {
+                Some(length) => length,
+                None => match end {
+                    Some(end) => end.checked_sub(offset).with_context(|| {
+                        format!(
+                            "CSV string artefact row {} global_end precedes global_start",
+                            row_index + 1
+                        )
+                    })?,
+                    None => 0,
+                },
             };
+            let artefact_type = fixed_type
+                .map(str::to_string)
+                .unwrap_or_else(|| csv_string_field(&headers, &record, &["artefact_type", "type"]));
 
             artefacts.push(StringArtefact {
-                artefact_type,
-                value: csv_string(row, value_keys).unwrap_or_default(),
-                offset: start,
-                length: length.unwrap_or(0),
+                artefact_kind: normalize_artefact_type(&artefact_type),
+                content: csv_string_field(&headers, &record, value_columns),
+                global_start: offset,
+                global_end: end,
+                length,
+                encoding: csv_optional_string_field(&headers, &record, &["encoding"]),
+                source: csv_optional_string_field(
+                    &headers,
+                    &record,
+                    &["source", "source_path", "source_file"],
+                ),
+                run_id: csv_optional_string_field(&headers, &record, &["run_id"]),
             });
-            Ok(())
-        })?;
+        }
 
         Ok(artefacts)
     }
 
-    fn carved_file_from_json(value: &Value, fallback_id: u64) -> Result<CarvedFile> {
-        if value.get("global_start").is_none()
-            && value.get("carved_path").is_none()
-            && value.get("validated").is_none()
-        {
-            let mut file: CarvedFile = serde_json::from_value(value.clone())?;
-            if file.id == 0 {
-                file.id = fallback_id;
+    fn read_table_records(&self, stem: &str) -> Result<Vec<MetadataRecord>> {
+        match self.backend.as_str() {
+            "parquet" => self.read_parquet_records_for_stem(stem),
+            "jsonl" => self
+                .read_jsonl_records(&self.run_path.join("metadata").join(format!("{stem}.jsonl"))),
+            "csv" => {
+                self.read_csv_records(&self.run_path.join("metadata").join(format!("{stem}.csv")))
             }
-            return Ok(file);
+            _ => bail!("Unknown metadata backend: {}", self.backend),
         }
-
-        let start = json_u64(value, &["offset", "global_start"]).unwrap_or(0);
-        let end = json_u64(value, &["global_end"]);
-        let size = json_u64(value, &["size"]).or_else(|| end.map(|e| e.saturating_sub(start)));
-
-        Ok(CarvedFile {
-            id: json_u64(value, &["id"]).unwrap_or(fallback_id),
-            file_type: json_string(value, &["file_type"]).unwrap_or_default(),
-            offset: start,
-            size: size.unwrap_or(0),
-            output_path: json_string(value, &["output_path", "carved_path"]).unwrap_or_default(),
-            sha256: json_string(value, &["sha256"]),
-            is_valid: json_bool(value, &["is_valid", "validated"]).unwrap_or(true),
-            mime_type: json_string(value, &["mime_type"]),
-            width: json_u64(value, &["width"]).and_then(|v| u32::try_from(v).ok()),
-            height: json_u64(value, &["height"]).and_then(|v| u32::try_from(v).ok()),
-        })
     }
 
-    fn string_artefact_from_json(value: &Value) -> Result<StringArtefact> {
-        if value.get("artefact_kind").is_none()
-            && value.get("content").is_none()
-            && value.get("global_start").is_none()
-        {
-            return Ok(serde_json::from_value(value.clone())?);
+    fn table_exists(&self, stem: &str) -> Result<bool> {
+        match self.backend.as_str() {
+            "parquet" => self.parquet_table_exists(stem),
+            "jsonl" => Ok(self
+                .run_path
+                .join("metadata")
+                .join(format!("{stem}.jsonl"))
+                .exists()),
+            "csv" => Ok(self
+                .run_path
+                .join("metadata")
+                .join(format!("{stem}.csv"))
+                .exists()),
+            _ => bail!("Unknown metadata backend: {}", self.backend),
+        }
+    }
+
+    fn parquet_table_exists(&self, stem: &str) -> Result<bool> {
+        let parquet_dir = self.run_path.join("parquet");
+        if !parquet_dir.exists() {
+            return Ok(false);
         }
 
-        let raw_type = json_string(value, &["artefact_type", "artefact_kind"])
-            .unwrap_or_else(|| "string".to_string());
-        let artefact_type = normalize_artefact_type(&raw_type);
-        let start = json_u64(value, &["offset", "global_start"]).unwrap_or(0);
-        let end = json_u64(value, &["global_end"]);
-        let length = json_u64(value, &["length"]).or_else(|| end.map(|e| e.saturating_sub(start)));
+        for entry in std::fs::read_dir(&parquet_dir)? {
+            let entry = entry?;
+            if parquet_file_matches_stem(&entry.path(), stem) {
+                return Ok(true);
+            }
+        }
 
-        let value_keys: &[&str] = match artefact_type.as_str() {
-            "phone" => &["phone_e164", "value", "content", "phone_raw"],
-            "bitlocker_recovery_password" => &["recovery_password", "value", "content"],
-            _ => &["value", "content", "url", "email"],
+        Ok(false)
+    }
+
+    fn read_parquet_records_for_stem(&self, stem: &str) -> Result<Vec<MetadataRecord>> {
+        let parquet_dir = self.run_path.join("parquet");
+        if !parquet_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(&parquet_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if parquet_file_matches_stem(&path, stem) {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+
+        let mut records = Vec::new();
+        for path in paths {
+            records.extend(self.read_parquet_records(&path)?);
+        }
+        Ok(records)
+    }
+
+    fn read_parquet_records(&self, path: &Path) -> Result<Vec<MetadataRecord>> {
+        let file = File::open(path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+        let mut records = Vec::new();
+
+        for batch_result in reader {
+            let batch = batch_result?;
+            let schema = batch.schema();
+
+            for row_index in 0..batch.num_rows() {
+                let mut fields = BTreeMap::new();
+                for (column_index, field) in schema.fields().iter().enumerate() {
+                    if let Some(value) =
+                        parquet_scalar_to_string(batch.column(column_index).as_ref(), row_index)?
+                    {
+                        fields.insert(field.name().clone(), value);
+                    }
+                }
+                records.push(MetadataRecord::new(fields));
+            }
+        }
+
+        Ok(records)
+    }
+
+    fn read_jsonl_records(&self, path: &Path) -> Result<Vec<MetadataRecord>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut records = Vec::new();
+
+        for (line_index, line) in reader.lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(&line).with_context(|| {
+                format!(
+                    "Failed to parse {} line {}",
+                    metadata_file_name(path),
+                    line_index + 1
+                )
+            })?;
+            records.push(metadata_record_from_json(value).with_context(|| {
+                format!(
+                    "Failed to read {} line {} as an object",
+                    metadata_file_name(path),
+                    line_index + 1
+                )
+            })?);
+        }
+
+        Ok(records)
+    }
+
+    fn read_csv_records(&self, path: &Path) -> Result<Vec<MetadataRecord>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut reader =
+            csv::Reader::from_path(path).with_context(|| "Failed to open CSV artefact metadata")?;
+        let headers = reader
+            .headers()
+            .with_context(|| "Failed to read CSV artefact headers")?
+            .clone();
+        let mut records = Vec::new();
+
+        for (row_index, record) in reader.records().enumerate() {
+            let record = record
+                .with_context(|| format!("Failed to read CSV artefact row {}", row_index + 1))?;
+            let mut fields = BTreeMap::new();
+            for (index, header) in headers.iter().enumerate() {
+                if let Some(value) = record.get(index).filter(|value| !value.is_empty()) {
+                    fields.insert(header.to_string(), value.to_string());
+                }
+            }
+            records.push(MetadataRecord::new(fields));
+        }
+
+        Ok(records)
+    }
+}
+
+fn parquet_file_matches_stem(path: &Path, stem: &str) -> bool {
+    path.extension().map(|e| e == "parquet").unwrap_or(false)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name == format!("{stem}.parquet")
+                    || name
+                        .strip_suffix(".parquet")
+                        .and_then(|name_without_extension| {
+                            name_without_extension.strip_prefix(stem)
+                        })
+                        .and_then(|suffix| suffix.strip_prefix('_'))
+                        .is_some()
+            })
+            .unwrap_or(false)
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonCarvedFileRow {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    file_type: String,
+    #[serde(default, alias = "output_path", alias = "carved_path")]
+    path: String,
+    #[serde(default)]
+    extension: Option<String>,
+    #[serde(default, alias = "offset")]
+    global_start: Option<u64>,
+    #[serde(default)]
+    global_end: Option<u64>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    handler_id: Option<String>,
+    #[serde(default)]
+    md5: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default, alias = "is_valid")]
+    validated: Option<bool>,
+    #[serde(default)]
+    truncated: Option<bool>,
+    #[serde(default)]
+    errors: Vec<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    pattern_id: Option<String>,
+    #[serde(default)]
+    is_duplicate: Option<bool>,
+    #[serde(default)]
+    duplicate_of_offset: Option<u64>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+}
+
+impl JsonCarvedFileRow {
+    fn into_carved_file(mut self, fallback_id: u64) -> Result<CarvedFile> {
+        let global_start = self.global_start.unwrap_or(0);
+        let size = self.size.unwrap_or(0);
+        let global_end =
+            self.global_end
+                .unwrap_or(global_start.checked_add(size).with_context(|| {
+                    format!("JSONL row {fallback_id} global_start + size overflowed")
+                })?);
+        if let Some(error) = self.error.take().filter(|error| !error.is_empty()) {
+            self.errors.push(error);
+        }
+
+        Ok(CarvedFile {
+            id: self.id.unwrap_or(fallback_id),
+            run_id: self.run_id,
+            file_type: self.file_type,
+            extension: self.extension.or_else(|| extension_from_path(&self.path)),
+            global_start,
+            global_end,
+            size,
+            path: self.path,
+            handler_id: self.handler_id,
+            md5: self.md5,
+            sha256: self.sha256,
+            validated: self.validated,
+            truncated: self.truncated.unwrap_or(false),
+            errors: self.errors,
+            pattern_id: self.pattern_id,
+            is_duplicate: self.is_duplicate.unwrap_or(false),
+            duplicate_of_offset: self.duplicate_of_offset,
+            mime_type: self.mime_type,
+            width: self.width,
+            height: self.height,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonStringArtefactRow {
+    #[serde(default, alias = "artefact_kind")]
+    artefact_type: String,
+    #[serde(default, alias = "content")]
+    value: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    phone: Option<String>,
+    #[serde(default)]
+    phone_e164: Option<String>,
+    #[serde(default)]
+    phone_raw: Option<String>,
+    #[serde(default)]
+    number: Option<String>,
+    #[serde(default)]
+    recovery_password: Option<String>,
+    #[serde(default, alias = "global_start")]
+    offset: u64,
+    #[serde(default)]
+    global_end: Option<u64>,
+    #[serde(default)]
+    length: Option<u64>,
+    #[serde(default)]
+    encoding: Option<String>,
+    #[serde(default, alias = "source_path", alias = "source_file")]
+    source: Option<String>,
+    #[serde(default)]
+    run_id: Option<String>,
+}
+
+impl JsonStringArtefactRow {
+    fn into_string_artefact(
+        self,
+        source_path: &Path,
+        line_number: usize,
+    ) -> Result<StringArtefact> {
+        let length = match self.length {
+            Some(length) => length,
+            None => match self.global_end {
+                Some(end) => end.checked_sub(self.offset).with_context(|| {
+                    format!(
+                        "{} line {} global_end precedes global_start",
+                        metadata_file_name(source_path),
+                        line_number
+                    )
+                })?,
+                None => 0,
+            },
+        };
+        let artefact_kind = normalize_artefact_type(&self.artefact_type);
+        let content = match artefact_kind.as_str() {
+            "phone" => self
+                .phone_e164
+                .or(self.phone)
+                .or(self.phone_raw)
+                .or(self.number)
+                .unwrap_or(self.value),
+            "bitlocker_recovery_password" => self.recovery_password.unwrap_or(self.value),
+            "url" => self.url.unwrap_or(self.value),
+            "email" => self.email.unwrap_or(self.value),
+            _ => self.value,
         };
 
         Ok(StringArtefact {
-            artefact_type,
-            value: json_string(value, value_keys).unwrap_or_default(),
-            offset: start,
-            length: length.unwrap_or(0),
-        })
-    }
-
-    /// Get summary of metadata
-    pub fn get_summary(&self) -> Result<MetadataSummary> {
-        let files = self.read_carved_files()?;
-        let strings = self.read_string_artefacts()?;
-
-        let mut by_type: HashMap<String, usize> = HashMap::new();
-        let mut total_bytes = 0u64;
-
-        for file in &files {
-            *by_type.entry(file.file_type.clone()).or_insert(0) += 1;
-            total_bytes += file.size;
-        }
-
-        Ok(MetadataSummary {
-            total_files: files.len(),
-            by_type,
-            total_bytes,
-            string_artefacts: strings.len(),
+            artefact_kind,
+            content,
+            global_start: self.offset,
+            global_end: self.global_end,
+            length,
+            encoding: self.encoding,
+            source: self.source,
+            run_id: self.run_id,
         })
     }
 }
 
-fn json_string(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_str))
-        .map(str::to_string)
-}
-
-fn json_bool(value: &Value, keys: &[&str]) -> Option<bool> {
-    keys.iter().find_map(|key| {
-        let value = value.get(*key)?;
-        if let Some(value) = value.as_bool() {
-            return Some(value);
-        }
-        let Some(value) = value.as_str() else {
-            tracing::warn!("Unrecognised JSON boolean value for metadata field {key}");
-            return Some(false);
-        };
-        parse_bool_value(value, key)
-    })
-}
-
-fn json_u64(value: &Value, keys: &[&str]) -> Option<u64> {
-    keys.iter().find_map(|key| {
-        let value = value.get(*key)?;
-        if let Some(n) = value.as_u64() {
-            Some(n)
-        } else {
-            value.as_i64().and_then(|n| u64::try_from(n).ok())
-        }
-    })
-}
-
-fn csv_string(row: &HashMap<String, String>, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| row.get(*key))
-        .filter(|value| !value.is_empty())
-        .cloned()
-}
-
-fn csv_bool(row: &HashMap<String, String>, keys: &[&str]) -> Option<bool> {
-    keys.iter()
-        .find_map(|key| {
-            row.get(*key)
-                .filter(|value| !value.is_empty())
-                .map(|value| (*key, value))
+fn string_artefact_from_record(
+    record: MetadataRecord,
+    fixed_kind: Option<&str>,
+) -> Result<StringArtefact> {
+    let artefact_kind = fixed_kind
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            record
+                .get(&["artefact_kind", "artefact_type", "type"])
+                .map(ToOwned::to_owned)
         })
-        .and_then(|(key, value)| parse_bool_value(value, key))
-}
-
-fn csv_u64(row: &HashMap<String, String>, keys: &[&str]) -> Option<u64> {
-    csv_string(row, keys).and_then(|value| {
-        value.parse::<u64>().ok().or_else(|| {
-            value
-                .parse::<i64>()
-                .ok()
-                .and_then(|n| u64::try_from(n).ok())
-        })
-    })
-}
-
-fn parse_bool_value(value: &str, field: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" => Some(true),
-        "false" | "0" | "no" => Some(false),
-        _ => {
-            tracing::warn!("Unrecognised boolean value for metadata field {field}");
-            Some(false)
-        }
-    }
-}
-
-fn for_each_csv_row<F>(path: &Path, mut handle_row: F) -> Result<()>
-where
-    F: FnMut(usize, &HashMap<String, String>) -> Result<()>,
-{
-    let file = File::open(path).with_context(|| {
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("CSV metadata file");
-        format!("Failed to open {name}")
-    })?;
-    let mut reader = BufReader::new(file);
-    let Some(header) = read_csv_record(&mut reader)? else {
-        return Ok(());
+        .unwrap_or_default();
+    let artefact_kind = normalize_artefact_type(&artefact_kind);
+    let value_columns: &[&str] = match artefact_kind.as_str() {
+        "phone" => &[
+            "phone_e164",
+            "phone",
+            "phone_raw",
+            "number",
+            "content",
+            "value",
+            "string",
+        ],
+        "bitlocker_recovery_password" => &["recovery_password", "content", "value", "string"],
+        "url" => &["url", "content", "value", "string"],
+        "email" => &["email", "content", "value", "string"],
+        _ => &["content", "value", "string", "url", "email", "phone"],
+    };
+    let content = record
+        .get(value_columns)
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let global_start = record
+        .get_u64(&["global_start", "offset", "start"])
+        .unwrap_or(0);
+    let global_end = record.get_u64(&["global_end", "end"]);
+    let length = match record.get_u64(&["length"]) {
+        Some(length) => length,
+        None => match global_end {
+            Some(end) => end
+                .checked_sub(global_start)
+                .context("String artefact global_end precedes global_start")?,
+            None => 0,
+        },
     };
 
-    let mut row_idx = 0usize;
-    while let Some(row) = read_csv_record(&mut reader)
-        .with_context(|| format!("Failed to parse CSV metadata row {}", row_idx + 2))?
-    {
-        if row.iter().all(|cell| cell.is_empty()) {
-            continue;
-        }
-
-        let mut fields = HashMap::new();
-        for (idx, name) in header.iter().enumerate() {
-            fields.insert(name.clone(), row.get(idx).cloned().unwrap_or_default());
-        }
-        handle_row(row_idx, &fields)?;
-        row_idx += 1;
-    }
-
-    Ok(())
-}
-
-fn read_csv_record(reader: &mut impl BufRead) -> Result<Option<Vec<String>>> {
-    let mut record = String::new();
-
-    loop {
-        let mut line = String::new();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 {
-            if record.is_empty() {
-                return Ok(None);
-            }
-            return Ok(Some(parse_csv_record(&record)?));
-        }
-
-        record.push_str(&line);
-        if csv_record_is_complete(&record) {
-            return Ok(Some(parse_csv_record(&record)?));
-        }
-    }
-}
-
-fn csv_record_is_complete(text: &str) -> bool {
-    let mut chars = text.chars().peekable();
-    let mut in_quotes = false;
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' if in_quotes && chars.peek() == Some(&'"') => {
-                chars.next();
-            }
-            '"' => in_quotes = !in_quotes,
-            _ => {}
-        }
-    }
-
-    !in_quotes
-}
-
-fn parse_csv_record(text: &str) -> Result<Vec<String>> {
-    let mut row = Vec::new();
-    let mut field = String::new();
-    let mut chars = text.chars().peekable();
-    let mut in_quotes = false;
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' if in_quotes && chars.peek() == Some(&'"') => {
-                field.push('"');
-                chars.next();
-            }
-            '"' => {
-                in_quotes = !in_quotes;
-            }
-            ',' if !in_quotes => {
-                row.push(std::mem::take(&mut field));
-            }
-            '\n' if !in_quotes => {
-                row.push(std::mem::take(&mut field));
-                return Ok(row);
-            }
-            '\r' if !in_quotes => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                row.push(std::mem::take(&mut field));
-                return Ok(row);
-            }
-            _ => field.push(ch),
-        }
-    }
-
-    if in_quotes {
-        bail!("Unterminated quoted CSV field");
-    }
-
-    row.push(field);
-    Ok(row)
+    Ok(StringArtefact {
+        artefact_kind,
+        content,
+        global_start,
+        global_end,
+        length,
+        encoding: record
+            .get(&["encoding", "source_encoding"])
+            .map(ToOwned::to_owned),
+        source: record
+            .get(&["source", "source_path", "source_file"])
+            .map(ToOwned::to_owned),
+        run_id: record.get(&["run_id"]).map(ToOwned::to_owned),
+    })
 }
 
 fn normalize_artefact_type(raw: &str) -> String {
@@ -798,11 +1245,426 @@ fn normalize_artefact_type(raw: &str) -> String {
     .to_string()
 }
 
+fn metadata_record_from_json(value: serde_json::Value) -> Result<MetadataRecord> {
+    let serde_json::Value::Object(object) = value else {
+        bail!("metadata row is not an object");
+    };
+
+    let fields = object
+        .into_iter()
+        .filter_map(|(key, value)| json_value_to_string(value).map(|value| (key, value)))
+        .collect();
+
+    Ok(MetadataRecord::new(fields))
+}
+
+fn json_value_to_string(value: serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) => Some(value),
+        other @ (serde_json::Value::Array(_) | serde_json::Value::Object(_)) => {
+            Some(other.to_string())
+        }
+    }
+}
+
+fn parquet_scalar_to_string(array: &dyn Array, row_index: usize) -> Result<Option<String>> {
+    if array.is_null(row_index) {
+        return Ok(None);
+    }
+    if let Some(array) = array.as_any().downcast_ref::<StringArray>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<BooleanArray>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<UInt64Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<UInt32Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<UInt16Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<UInt8Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Int64Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Int32Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Int16Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Int8Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Float64Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+    if let Some(array) = array.as_any().downcast_ref::<Float32Array>() {
+        return Ok(Some(array.value(row_index).to_string()));
+    }
+
+    bail!(
+        "Parquet column type {:?} is not supported for artefact display",
+        array.data_type()
+    )
+}
+
+fn parquet_string_field(
+    batch: &RecordBatch,
+    names: &[&str],
+    row_index: usize,
+) -> Result<Option<String>> {
+    for name in names {
+        if let Some(column) = batch.column_by_name(name) {
+            if column.is_null(row_index) {
+                return Ok(None);
+            }
+            let array = column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .with_context(|| format!("Parquet column {name} is not a UTF-8 string column"))?;
+            return Ok(Some(array.value(row_index).to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn parquet_bool_field(
+    batch: &RecordBatch,
+    names: &[&str],
+    row_index: usize,
+) -> Result<Option<bool>> {
+    for name in names {
+        if let Some(column) = batch.column_by_name(name) {
+            if column.is_null(row_index) {
+                return Ok(None);
+            }
+            let array = column
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .with_context(|| format!("Parquet column {name} is not a boolean column"))?;
+            return Ok(Some(array.value(row_index)));
+        }
+    }
+    Ok(None)
+}
+
+fn parquet_u64_field(batch: &RecordBatch, names: &[&str], row_index: usize) -> Result<Option<u64>> {
+    for name in names {
+        if let Some(column) = batch.column_by_name(name) {
+            if column.is_null(row_index) {
+                return Ok(None);
+            }
+            if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
+                return Ok(Some(array.value(row_index)));
+            }
+            if let Some(array) = column.as_any().downcast_ref::<UInt32Array>() {
+                return Ok(Some(u64::from(array.value(row_index))));
+            }
+            if let Some(array) = column.as_any().downcast_ref::<UInt16Array>() {
+                return Ok(Some(u64::from(array.value(row_index))));
+            }
+            if let Some(array) = column.as_any().downcast_ref::<UInt8Array>() {
+                return Ok(Some(u64::from(array.value(row_index))));
+            }
+            if let Some(array) = column.as_any().downcast_ref::<Int64Array>() {
+                return u64::try_from(array.value(row_index))
+                    .with_context(|| format!("Parquet column {name} contains a negative value"))
+                    .map(Some);
+            }
+            if let Some(array) = column.as_any().downcast_ref::<Int32Array>() {
+                return u64::try_from(array.value(row_index))
+                    .with_context(|| format!("Parquet column {name} contains a negative value"))
+                    .map(Some);
+            }
+            if let Some(array) = column.as_any().downcast_ref::<Int16Array>() {
+                return u64::try_from(array.value(row_index))
+                    .with_context(|| format!("Parquet column {name} contains a negative value"))
+                    .map(Some);
+            }
+            if let Some(array) = column.as_any().downcast_ref::<Int8Array>() {
+                return u64::try_from(array.value(row_index))
+                    .with_context(|| format!("Parquet column {name} contains a negative value"))
+                    .map(Some);
+            }
+            bail!("Parquet column {name} is not an integer column");
+        }
+    }
+    Ok(None)
+}
+
+fn parquet_u32_field(batch: &RecordBatch, names: &[&str], row_index: usize) -> Result<Option<u32>> {
+    parquet_u64_field(batch, names, row_index)?
+        .map(|value| {
+            u32::try_from(value)
+                .with_context(|| format!("Parquet value {value} does not fit in u32"))
+        })
+        .transpose()
+}
+
+fn parquet_span_length(
+    artefact_type: &str,
+    row_index: usize,
+    offset: u64,
+    end: u64,
+) -> Result<u64> {
+    end.checked_sub(offset).with_context(|| {
+        format!("Parquet {artefact_type} artefact row {row_index} global_end precedes global_start")
+    })
+}
+
+fn error_values(error: Option<String>) -> Vec<String> {
+    // SwiftBeaver v0.5.1 writes Parquet `error` as nullable Utf8 and JSONL
+    // `errors` as an array; CSV compatibility may contain either a JSON array
+    // string or one plain error string.
+    match error.filter(|error| !error.is_empty()) {
+        Some(error) => serde_json::from_str::<Vec<String>>(&error).unwrap_or_else(|_| vec![error]),
+        None => Vec::new(),
+    }
+}
+
+fn extension_from_path(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn metadata_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("metadata JSONL")
+        .to_string()
+}
+
+fn csv_field<'a>(
+    headers: &csv::StringRecord,
+    record: &'a csv::StringRecord,
+    names: &[&str],
+) -> Option<&'a str> {
+    names.iter().find_map(|name| {
+        headers
+            .iter()
+            .position(|header| header == *name)
+            .and_then(|index| record.get(index))
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn csv_string_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> String {
+    csv_field(headers, record, names)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn csv_optional_string_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> Option<String> {
+    csv_field(headers, record, names).map(ToOwned::to_owned)
+}
+
+fn csv_u64_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> Result<Option<u64>> {
+    csv_field(headers, record, names)
+        .map(|value| {
+            value
+                .trim()
+                .parse::<u64>()
+                .with_context(|| "Invalid unsigned integer CSV value")
+        })
+        .transpose()
+}
+
+fn csv_u32_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> Result<Option<u32>> {
+    csv_field(headers, record, names)
+        .map(|value| {
+            value
+                .trim()
+                .parse::<u32>()
+                .with_context(|| "Invalid unsigned integer CSV value")
+        })
+        .transpose()
+}
+
+fn csv_bool_field(
+    headers: &csv::StringRecord,
+    record: &csv::StringRecord,
+    names: &[&str],
+) -> Result<Option<bool>> {
+    csv_field(headers, record, names)
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "y" => Ok(true),
+            "false" | "0" | "no" | "n" => Ok(false),
+            _ => bail!("Invalid boolean CSV value"),
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::MetadataSummary;
+    use arrow::array::{ArrayRef, BooleanArray, Int32Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
     use std::fs;
+    use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn write_v051_files_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("run_id", DataType::Utf8, false),
+            Field::new("tool_version", DataType::Utf8, false),
+            Field::new("config_hash", DataType::Utf8, false),
+            Field::new("evidence_path", DataType::Utf8, false),
+            Field::new("evidence_sha256", DataType::Utf8, false),
+            Field::new("handler_id", DataType::Utf8, false),
+            Field::new("file_type", DataType::Utf8, false),
+            Field::new("carved_path", DataType::Utf8, false),
+            Field::new("global_start", DataType::Int64, false),
+            Field::new("global_end", DataType::Int64, false),
+            Field::new("size", DataType::Int64, false),
+            Field::new("md5", DataType::Utf8, true),
+            Field::new("sha256", DataType::Utf8, true),
+            Field::new("pattern_id", DataType::Utf8, true),
+            Field::new("validated", DataType::Boolean, false),
+            Field::new("truncated", DataType::Boolean, false),
+            Field::new("error", DataType::Utf8, true),
+            Field::new("is_duplicate", DataType::Boolean, false),
+            Field::new("duplicate_of_offset", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["run-1", "run-1"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["0.5.1", "0.5.1"])),
+                Arc::new(StringArray::from(vec!["cfg", "cfg"])),
+                Arc::new(StringArray::from(vec!["/evidence.dd", "/evidence.dd"])),
+                Arc::new(StringArray::from(vec!["evidence-sha", "evidence-sha"])),
+                Arc::new(StringArray::from(vec!["jpeg", "jpeg"])),
+                Arc::new(StringArray::from(vec!["jpeg", "jpeg"])),
+                Arc::new(StringArray::from(vec![
+                    "jpeg/jpeg_000000000400.jpg",
+                    "jpeg/jpeg_000000000800.jpg",
+                ])),
+                Arc::new(Int64Array::from(vec![1024, 2048])),
+                Arc::new(Int64Array::from(vec![1056, 4096])),
+                Arc::new(Int64Array::from(vec![32, 2048])),
+                Arc::new(StringArray::from(vec![Some("md5-a"), None])),
+                Arc::new(StringArray::from(vec![Some("sha-a"), Some("sha-b")])),
+                Arc::new(StringArray::from(vec![Some("jpeg_soi"), None])),
+                Arc::new(BooleanArray::from(vec![true, false])),
+                Arc::new(BooleanArray::from(vec![false, true])),
+                Arc::new(StringArray::from(vec![None, Some("truncated footer")])),
+                Arc::new(BooleanArray::from(vec![false, true])),
+                Arc::new(Int64Array::from(vec![None, Some(1024)])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
+
+    fn write_v051_artefact_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("artefact_kind", DataType::Utf8, false),
+            Field::new("content", DataType::Utf8, false),
+            Field::new("global_start", DataType::Int64, false),
+            Field::new("global_end", DataType::Int64, false),
+            Field::new("encoding", DataType::Utf8, true),
+            Field::new("source", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["url"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["https://example.test"])),
+                Arc::new(Int64Array::from(vec![10])),
+                Arc::new(Int64Array::from(vec![30])),
+                Arc::new(StringArray::from(vec![Some("utf8")])),
+                Arc::new(StringArray::from(vec![Some("chunk-1")])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
+
+    fn write_legacy_url_artefact_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("url", DataType::Utf8, false),
+            Field::new("global_start", DataType::Int64, false),
+            Field::new("global_end", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["https://example.test"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![10])),
+                Arc::new(Int64Array::from(vec![30])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
+
+    fn write_v051_run_summary_parquet(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bytes_scanned", DataType::Int64, false),
+            Field::new("chunks_processed", DataType::Int64, false),
+            Field::new("hits", DataType::Int64, false),
+            Field::new("files_carved", DataType::Int64, false),
+            Field::new("artefacts_extracted", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![4096])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![2])),
+                Arc::new(Int64Array::from(vec![3])),
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Int64Array::from(vec![5])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
 
     #[test]
     fn test_reader_requires_metadata() {
@@ -841,29 +1703,137 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].id, 1);
         assert_eq!(files[0].file_type, "jpeg");
+        assert_eq!(files[0].path, "out/1.jpg");
+        assert_eq!(files[0].global_start, 1024);
+        assert_eq!(files[0].global_end, 5120);
+        assert_eq!(files[0].validated, Some(true));
         assert_eq!(files[1].id, 2);
         assert_eq!(files[1].file_type, "png");
     }
 
     #[test]
-    fn test_reader_jsonl_v067_carved_file_schema() {
+    fn test_reader_live_jsonl_ignores_trailing_partial_row() {
         let temp = TempDir::new().unwrap();
         let metadata_dir = temp.path().join("metadata");
         fs::create_dir(&metadata_dir).unwrap();
 
-        let data = r#"{"run_id":"r1","file_type":"bek","carved_path":"carved/0001.bek","global_start":64,"global_end":192,"sha256":"abc","validated":true}"#;
+        let data = r#"{"id":1,"file_type":"jpeg","offset":1024,"size":4096,"output_path":"out/1.jpg","is_valid":true}
+{"id":2,"file_type":"png","offset":5120"#;
+        fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let files = reader.read_live_carved_files().unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, 1);
+        assert_eq!(files[0].file_type, "jpeg");
+    }
+
+    #[test]
+    fn test_reader_live_jsonl_rejects_malformed_complete_row() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data = "{\"id\":1,\"file_type\":\"jpeg\",\"offset\":1024}\nnot-json\n";
+        fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let result = reader.read_live_carved_files();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reader_live_jsonl_string_artefacts_ignore_trailing_partial_row() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.jsonl"),
+            r#"{"file_type":"jpeg","path":"1.jpg","global_start":0,"size":10}"#,
+        )
+        .unwrap();
+
+        let data = r#"{"artefact_kind":"email","content":"a@example.test","global_start":20,"global_end":34}
+{"artefact_kind":"url","content":"https://example"#;
+        fs::write(metadata_dir.join("string_artefacts.jsonl"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let strings = reader.read_live_string_artefacts().unwrap();
+
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "email");
+        assert_eq!(strings[0].content, "a@example.test");
+    }
+
+    #[test]
+    fn test_reader_live_refresh_rejects_csv_backend() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let result = reader.read_live_carved_files();
+
+        assert!(result.is_err());
+        assert!(format!("{:#}", result.unwrap_err())
+            .contains(MetadataReader::LIVE_REFRESH_UNSUPPORTED_BACKEND));
+    }
+
+    #[test]
+    fn test_reader_jsonl_missing_validation_is_not_run() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data =
+            r#"{"id":1,"file_type":"jpeg","offset":1024,"size":4096,"output_path":"out/1.jpg"}"#;
         fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
 
         let reader = MetadataReader::new(temp.path()).unwrap();
         let files = reader.read_carved_files().unwrap();
 
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].file_type, "bek");
-        assert_eq!(files[0].offset, 64);
-        assert_eq!(files[0].size, 128);
-        assert_eq!(files[0].output_path, "carved/0001.bek");
-        assert_eq!(files[0].sha256.as_deref(), Some("abc"));
-        assert!(files[0].is_valid);
+        assert_eq!(files[0].validated, None);
+    }
+
+    #[test]
+    fn test_reader_jsonl_v051_with_data() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data = r#"{"run_id":"run-1","file_type":"jpeg","path":"jpeg/jpeg_000000000400.jpg","extension":"jpg","global_start":1024,"global_end":1056,"size":32,"md5":"md5-a","sha256":"sha-a","validated":false,"truncated":true,"errors":["short footer"],"pattern_id":"jpeg_soi","is_duplicate":true,"duplicate_of_offset":512}
+{"run_id":"run-1","file_type":"png","path":"png/png_000000000800.png","extension":"png","global_start":2048,"global_end":4096,"size":2048,"md5":null,"sha256":"sha-b","validated":true,"truncated":false,"errors":[],"pattern_id":"png_sig","is_duplicate":false,"duplicate_of_offset":null}"#;
+        fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let files = reader.read_carved_files().unwrap();
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].id, 0);
+        assert_eq!(files[0].run_id.as_deref(), Some("run-1"));
+        assert_eq!(files[0].file_type, "jpeg");
+        assert_eq!(files[0].path, "jpeg/jpeg_000000000400.jpg");
+        assert_eq!(files[0].extension.as_deref(), Some("jpg"));
+        assert_eq!(files[0].global_start, 1024);
+        assert_eq!(files[0].global_end, 1056);
+        assert_eq!(files[0].size, 32);
+        assert_eq!(files[0].md5.as_deref(), Some("md5-a"));
+        assert_eq!(files[0].sha256.as_deref(), Some("sha-a"));
+        assert_eq!(files[0].validated, Some(false));
+        assert!(files[0].truncated);
+        assert_eq!(files[0].errors, vec!["short footer"]);
+        assert_eq!(files[0].pattern_id.as_deref(), Some("jpeg_soi"));
+        assert!(files[0].is_duplicate);
+        assert_eq!(files[0].duplicate_of_offset, Some(512));
+        assert_eq!(files[1].id, 1);
+        assert!(!files[1].is_duplicate);
     }
 
     #[test]
@@ -881,11 +1851,376 @@ mod tests {
         let artefacts = reader.read_string_artefacts().unwrap();
 
         assert_eq!(artefacts.len(), 2);
-        assert_eq!(artefacts[0].artefact_type, "phone");
-        assert_eq!(artefacts[0].value, "+14155552671");
-        assert_eq!(artefacts[0].offset, 10);
+        assert_eq!(artefacts[0].artefact_kind, "phone");
+        assert_eq!(artefacts[0].content, "+14155552671");
+        assert_eq!(artefacts[0].global_start, 10);
         assert_eq!(artefacts[0].length, 14);
-        assert_eq!(artefacts[1].artefact_type, "bitlocker_recovery_password");
+        assert_eq!(artefacts[1].artefact_kind, "bitlocker_recovery_password");
+    }
+
+    #[test]
+    fn test_reader_jsonl_v051_artefact_outputs() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.jsonl"),
+            r#"{"file_type":"jpeg","path":"1.jpg","global_start":0,"size":10}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("run_summary.jsonl"),
+            r#"{"bytes_scanned":4096,"chunks_processed":2,"hits":3,"files_carved":1,"rejected":4,"prevalidation_rejected":5,"overlap_skipped":6,"string_spans":7,"artefacts_extracted":8,"duplicates_found":9,"duplicates_skipped":10}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("string_artefacts.jsonl"),
+            r#"{"artefact_kind":"email","content":"a@example.test","global_start":20,"global_end":34,"encoding":"utf8","source":"chunk-1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("browser_history.jsonl"),
+            r#"{"url":"https://example.test","title":"Example","visit_count":2}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("windows_artefacts.jsonl"),
+            r#"{"artefact_kind":"lnk","path":"Users/Public/file.lnk","target_path":"C:/target"}"#,
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("entropy_regions.jsonl"),
+            r#"{"global_start":100,"global_end":200,"entropy":7.9}"#,
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let summary = reader.read_run_summary().unwrap().unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+        let history = reader.read_browser_history().unwrap();
+        let cookies = reader.read_browser_cookies().unwrap();
+        let windows = reader.read_windows_artefacts().unwrap();
+        let entropy = reader.read_entropy_regions().unwrap();
+
+        assert_eq!(summary.bytes_scanned, Some(4096));
+        assert_eq!(summary.prevalidation_rejected, Some(5));
+        assert_eq!(summary.duplicates_skipped, Some(10));
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "email");
+        assert_eq!(strings[0].content, "a@example.test");
+        assert_eq!(strings[0].global_start, 20);
+        assert_eq!(strings[0].global_end, Some(34));
+        assert_eq!(strings[0].length, 14);
+        assert_eq!(
+            history[0].fields.get("url").map(String::as_str),
+            Some("https://example.test")
+        );
+        assert!(cookies.is_empty());
+        assert_eq!(
+            windows[0].fields.get("target_path").map(String::as_str),
+            Some("C:/target")
+        );
+        assert_eq!(
+            entropy[0].fields.get("entropy").map(String::as_str),
+            Some("7.9")
+        );
+    }
+
+    #[test]
+    fn test_reader_jsonl_result_table_availability() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(metadata_dir.join("carved_files.jsonl"), "").unwrap();
+        fs::write(metadata_dir.join("browser_history.jsonl"), "").unwrap();
+        fs::write(metadata_dir.join("browser_cookies.jsonl"), "").unwrap();
+        fs::write(metadata_dir.join("windows_artefacts.jsonl"), "").unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let availability = reader.result_table_availability().unwrap();
+
+        assert!(availability.browser_history);
+        assert!(availability.browser_cookies);
+        assert!(!availability.browser_downloads);
+        assert!(availability.windows_artefacts);
+        assert!(!availability.entropy_regions);
+    }
+
+    #[test]
+    fn test_reader_parquet_v051_with_data() {
+        let temp = TempDir::new().unwrap();
+        let parquet_dir = temp.path().join("parquet");
+        fs::create_dir(&parquet_dir).unwrap();
+        write_v051_files_parquet(&parquet_dir.join("files_jpeg.parquet"));
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        assert_eq!(reader.backend(), "parquet");
+        let files = reader.read_carved_files().unwrap();
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].id, 0);
+        assert_eq!(files[0].run_id.as_deref(), Some("run-1"));
+        assert_eq!(files[0].handler_id.as_deref(), Some("jpeg"));
+        assert_eq!(files[0].file_type, "jpeg");
+        assert_eq!(files[0].path, "jpeg/jpeg_000000000400.jpg");
+        assert_eq!(files[0].extension.as_deref(), Some("jpg"));
+        assert_eq!(files[0].global_start, 1024);
+        assert_eq!(files[0].global_end, 1056);
+        assert_eq!(files[0].size, 32);
+        assert_eq!(files[0].md5.as_deref(), Some("md5-a"));
+        assert_eq!(files[0].sha256.as_deref(), Some("sha-a"));
+        assert_eq!(files[0].validated, Some(true));
+        assert!(!files[0].truncated);
+        assert_eq!(files[0].pattern_id.as_deref(), Some("jpeg_soi"));
+        assert!(!files[0].is_duplicate);
+
+        assert_eq!(files[1].id, 1);
+        assert_eq!(files[1].validated, Some(false));
+        assert!(files[1].truncated);
+        assert_eq!(files[1].errors, vec!["truncated footer"]);
+        assert!(files[1].is_duplicate);
+        assert_eq!(files[1].duplicate_of_offset, Some(1024));
+    }
+
+    #[test]
+    fn test_reader_parquet_v051_artefact_outputs() {
+        let temp = TempDir::new().unwrap();
+        let parquet_dir = temp.path().join("parquet");
+        fs::create_dir(&parquet_dir).unwrap();
+        write_v051_files_parquet(&parquet_dir.join("files_jpeg.parquet"));
+        write_v051_artefact_parquet(&parquet_dir.join("string_artefacts.parquet"));
+        write_v051_run_summary_parquet(&parquet_dir.join("run_summary.parquet"));
+        write_v051_artefact_parquet(&parquet_dir.join("browser_history.parquet"));
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let summary = reader.read_run_summary().unwrap().unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+        let history = reader.read_browser_history().unwrap();
+        let entropy = reader.read_entropy_regions().unwrap();
+
+        assert_eq!(summary.bytes_scanned, Some(4096));
+        assert_eq!(summary.chunks_processed, Some(2));
+        assert_eq!(summary.artefacts_extracted, Some(5));
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "url");
+        assert_eq!(strings[0].content, "https://example.test");
+        assert_eq!(strings[0].global_start, 10);
+        assert_eq!(strings[0].global_end, Some(30));
+        assert_eq!(strings[0].encoding.as_deref(), Some("utf8"));
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].fields.get("content").map(String::as_str),
+            Some("https://example.test")
+        );
+        assert!(entropy.is_empty());
+    }
+
+    #[test]
+    fn test_reader_parquet_result_table_availability_matches_stem_files() {
+        let temp = TempDir::new().unwrap();
+        let parquet_dir = temp.path().join("parquet");
+        fs::create_dir(&parquet_dir).unwrap();
+        fs::write(parquet_dir.join("browser_history_0000.parquet"), "").unwrap();
+        fs::write(parquet_dir.join("browser_downloads.parquet"), "").unwrap();
+        fs::write(parquet_dir.join("browser_cookies.csv"), "").unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let availability = reader.result_table_availability().unwrap();
+
+        assert!(availability.browser_history);
+        assert!(!availability.browser_cookies);
+        assert!(availability.browser_downloads);
+        assert!(!availability.windows_artefacts);
+        assert!(!availability.entropy_regions);
+    }
+
+    #[test]
+    fn test_reader_parquet_string_artefacts_prefers_unified_output() {
+        let temp = TempDir::new().unwrap();
+        let parquet_dir = temp.path().join("parquet");
+        fs::create_dir(&parquet_dir).unwrap();
+        write_v051_files_parquet(&parquet_dir.join("files_jpeg.parquet"));
+        write_v051_artefact_parquet(&parquet_dir.join("string_artefacts.parquet"));
+        write_legacy_url_artefact_parquet(&parquet_dir.join("artefacts_urls.parquet"));
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "url");
+        assert_eq!(strings[0].content, "https://example.test");
+    }
+
+    #[test]
+    fn test_parquet_integer_helper_accepts_int32() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("width", DataType::Int32, false),
+            Field::new("duplicate_of_offset", DataType::Int32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![800])) as ArrayRef,
+                Arc::new(Int32Array::from(vec![Some(1024)])),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(parquet_u32_field(&batch, &["width"], 0).unwrap(), Some(800));
+        assert_eq!(
+            parquet_u64_field(&batch, &["duplicate_of_offset"], 0).unwrap(),
+            Some(1024)
+        );
+    }
+
+    #[test]
+    fn test_reader_csv_with_data() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data = r#"id,file_type,global_start,size,carved_path,sha256,validated,mime_type,width,height
+7,jpeg,1024,4096,"carved/with, comma.jpg",abc123,true,image/jpeg,800,600
+,png,5120,2048,carved/2.png,,false,,,"#;
+        fs::write(metadata_dir.join("carved_files.csv"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        assert_eq!(reader.backend(), "csv");
+
+        let files = reader.read_carved_files().unwrap();
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].id, 7);
+        assert_eq!(files[0].file_type, "jpeg");
+        assert_eq!(files[0].global_start, 1024);
+        assert_eq!(files[0].global_end, 5120);
+        assert_eq!(files[0].size, 4096);
+        assert_eq!(files[0].path, "carved/with, comma.jpg");
+        assert_eq!(files[0].sha256.as_deref(), Some("abc123"));
+        assert_eq!(files[0].validated, Some(true));
+        assert_eq!(files[0].mime_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(files[0].width, Some(800));
+        assert_eq!(files[0].height, Some(600));
+        assert_eq!(files[1].id, 1);
+        assert_eq!(files[1].sha256, None);
+        assert_eq!(files[1].validated, Some(false));
+        assert_eq!(files[1].mime_type, None);
+        assert_eq!(files[1].width, None);
+        assert_eq!(files[1].height, None);
+    }
+
+    #[test]
+    fn test_reader_csv_missing_validation_is_not_run() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "id,file_type,global_start,size,carved_path\n1,jpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let files = reader.read_carved_files().unwrap();
+
+        assert_eq!(files[0].validated, None);
+    }
+
+    #[test]
+    fn test_reader_csv_missing_artefacts_are_empty() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let artefacts = reader.read_string_artefacts().unwrap();
+
+        assert!(artefacts.is_empty());
+    }
+
+    #[test]
+    fn test_reader_csv_string_artefacts() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("artefacts_urls.csv"),
+            "url,global_start,global_end\nhttps://example.test,10,30\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("strings.csv"),
+            "type,value,offset,length\nstring,hello,40,5\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let artefacts = reader.read_string_artefacts().unwrap();
+
+        assert_eq!(artefacts.len(), 2);
+        assert_eq!(artefacts[0].artefact_kind, "url");
+        assert_eq!(artefacts[0].content, "https://example.test");
+        assert_eq!(artefacts[0].global_start, 10);
+        assert_eq!(artefacts[0].length, 20);
+        assert_eq!(artefacts[1].artefact_kind, "string");
+        assert_eq!(artefacts[1].content, "hello");
+        assert_eq!(artefacts[1].global_start, 40);
+        assert_eq!(artefacts[1].length, 5);
+    }
+
+    #[test]
+    fn test_reader_csv_v051_artefact_outputs() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("run_summary.csv"),
+            "bytes_scanned,chunks_processed,hits,files_carved\n4096,2,3,1\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("string_artefacts.csv"),
+            "artefact_kind,content,global_start,global_end,encoding,source\nurl,https://example.test,10,30,utf8,chunk-1\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("browser_downloads.csv"),
+            "url,target_path,start_time\nhttps://example.test/file,/tmp/file,2026-01-01\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let summary = reader.read_run_summary().unwrap().unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+        let downloads = reader.read_browser_downloads().unwrap();
+        let windows = reader.read_windows_artefacts().unwrap();
+
+        assert_eq!(summary.bytes_scanned, Some(4096));
+        assert_eq!(summary.files_carved, Some(1));
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "url");
+        assert_eq!(strings[0].content, "https://example.test");
+        assert_eq!(strings[0].length, 20);
+        assert_eq!(
+            downloads[0].fields.get("target_path").map(String::as_str),
+            Some("/tmp/file")
+        );
+        assert!(windows.is_empty());
     }
 
     #[test]
@@ -898,9 +2233,9 @@ mod tests {
 r1,bek,carved/0001.bek,bek,64,192,128,,abc,true,false,,,false,,0.6.7,hash,/evidence/source.dd,\n";
         fs::write(metadata_dir.join("carved_files.csv"), files).unwrap();
 
-        let strings = "run_id,artefact_kind,content,encoding,global_start,global_end,tool_version,config_hash,evidence_path,evidence_sha256\n\
-r1,phone,+1 415 555 2671,ascii,10,24,0.6.7,hash,/evidence/source.dd,\n\
-r1,bitlocker_recovery_password,\"000000-000000,000000-000000\",ascii,100,125,0.6.7,hash,/evidence/source.dd,\n";
+        let strings = "run_id,artefact_kind,content,phone_e164,encoding,global_start,global_end,tool_version,config_hash,evidence_path,evidence_sha256\n\
+r1,phone,+1 415 555 2671,+14155552671,ascii,10,24,0.6.7,hash,/evidence/source.dd,\n\
+r1,bitlocker_recovery_password,\"000000-000000,000000-000000\",,ascii,100,125,0.6.7,hash,/evidence/source.dd,\n";
         fs::write(metadata_dir.join("string_artefacts.csv"), strings).unwrap();
 
         let reader = MetadataReader::new(temp.path()).unwrap();
@@ -909,52 +2244,85 @@ r1,bitlocker_recovery_password,\"000000-000000,000000-000000\",ascii,100,125,0.6
         let files = reader.read_carved_files().unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file_type, "bek");
-        assert_eq!(files[0].offset, 64);
+        assert_eq!(files[0].global_start, 64);
+        assert_eq!(files[0].global_end, 192);
         assert_eq!(files[0].size, 128);
-        assert_eq!(files[0].output_path, "carved/0001.bek");
+        assert_eq!(files[0].path, "carved/0001.bek");
         assert_eq!(files[0].sha256.as_deref(), Some("abc"));
-        assert!(files[0].is_valid);
+        assert_eq!(files[0].validated, Some(true));
 
         let artefacts = reader.read_string_artefacts().unwrap();
         assert_eq!(artefacts.len(), 2);
-        assert_eq!(artefacts[0].artefact_type, "phone");
-        assert_eq!(artefacts[0].value, "+1 415 555 2671");
+        assert_eq!(artefacts[0].artefact_kind, "phone");
+        assert_eq!(artefacts[0].content, "+14155552671");
         assert_eq!(artefacts[0].length, 14);
-        assert_eq!(artefacts[1].artefact_type, "bitlocker_recovery_password");
-        assert_eq!(artefacts[1].value, "000000-000000,000000-000000");
+        assert_eq!(artefacts[1].artefact_kind, "bitlocker_recovery_password");
+        assert_eq!(artefacts[1].content, "000000-000000,000000-000000");
     }
 
     #[test]
-    fn test_reader_csv_unknown_validated_value_is_not_valid() {
+    fn test_reader_csv_string_artefacts_prefers_unified_output() {
         let temp = TempDir::new().unwrap();
         let metadata_dir = temp.path().join("metadata");
         fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,0,100,1.jpg\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("string_artefacts.csv"),
+            "artefact_kind,content,global_start,global_end\nurl,https://example.test,10,30\n",
+        )
+        .unwrap();
+        fs::write(
+            metadata_dir.join("artefacts_urls.csv"),
+            "url,global_start,global_end\nhttps://example.test,10,30\n",
+        )
+        .unwrap();
 
-        let files = "run_id,file_type,path,global_start,global_end,size,validated\n\
-r1,bek,carved/0001.bek,64,192,128,validated\n";
-        fs::write(metadata_dir.join("carved_files.csv"), files).unwrap();
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0].artefact_kind, "url");
+        assert_eq!(strings[0].content, "https://example.test");
+    }
+
+    #[test]
+    fn test_reader_csv_rejects_malformed_numeric_field() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "file_type,global_start,size,carved_path\njpeg,not-a-number,100,1.jpg\n",
+        )
+        .unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let result = reader.read_carved_files();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reader_csv_missing_ids_do_not_collide_with_explicit_ids() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+        fs::write(
+            metadata_dir.join("carved_files.csv"),
+            "id,file_type,global_start,size,carved_path\n1,jpeg,0,100,1.jpg\n,png,100,200,2.png\n,gif,300,50,3.gif\n",
+        )
+        .unwrap();
 
         let reader = MetadataReader::new(temp.path()).unwrap();
         let files = reader.read_carved_files().unwrap();
 
-        assert_eq!(files.len(), 1);
-        assert!(!files[0].is_valid);
-    }
-
-    #[test]
-    fn test_reader_csv_missing_carved_file_has_clear_error() {
-        let temp = TempDir::new().unwrap();
-        let metadata_dir = temp.path().join("metadata");
-        fs::create_dir(&metadata_dir).unwrap();
-        let carved_path = metadata_dir.join("carved_files.csv");
-        fs::write(&carved_path, "").unwrap();
-
-        let reader = MetadataReader::new(temp.path()).unwrap();
-        fs::remove_file(carved_path).unwrap();
-
-        let err = reader.read_carved_files().unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("Failed to open carved_files.csv"));
+        assert_eq!(files[0].id, 1);
+        assert_eq!(files[1].id, 2);
+        assert_eq!(files[2].id, 3);
     }
 
     #[test]
@@ -969,7 +2337,32 @@ r1,bek,carved/0001.bek,64,192,128,validated\n";
         fs::write(metadata_dir.join("carved_files.jsonl"), data).unwrap();
 
         let reader = MetadataReader::new(temp.path()).unwrap();
-        let summary = reader.get_summary().unwrap();
+        let files = reader.read_carved_files().unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+        let summary = MetadataSummary::from_results(&files, &strings).unwrap();
+
+        assert_eq!(summary.total_files, 3);
+        assert_eq!(summary.total_bytes, 3500);
+        assert_eq!(summary.by_type.get("jpeg"), Some(&2));
+        assert_eq!(summary.by_type.get("png"), Some(&1));
+    }
+
+    #[test]
+    fn test_reader_csv_summary() {
+        let temp = TempDir::new().unwrap();
+        let metadata_dir = temp.path().join("metadata");
+        fs::create_dir(&metadata_dir).unwrap();
+
+        let data = r#"file_type,global_start,size,carved_path
+jpeg,0,1000,1.jpg
+jpeg,1000,2000,2.jpg
+png,3000,500,3.png"#;
+        fs::write(metadata_dir.join("carved_files.csv"), data).unwrap();
+
+        let reader = MetadataReader::new(temp.path()).unwrap();
+        let files = reader.read_carved_files().unwrap();
+        let strings = reader.read_string_artefacts().unwrap();
+        let summary = MetadataSummary::from_results(&files, &strings).unwrap();
 
         assert_eq!(summary.total_files, 3);
         assert_eq!(summary.total_bytes, 3500);

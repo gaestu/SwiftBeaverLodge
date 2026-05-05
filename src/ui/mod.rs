@@ -4,6 +4,7 @@ mod config_panel;
 mod progress_panel;
 mod results_panel;
 
+pub(crate) use config_panel::validate_config;
 pub use config_panel::ConfigPanel;
 pub use progress_panel::ProgressPanel;
 pub use results_panel::ResultsPanel;

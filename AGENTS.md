@@ -39,7 +39,7 @@ When requirements are unclear, prefer conservative, backward-compatible changes 
 - `src/ui/` - configuration, progress, and results panels
 - `tests/` - integration tests that should not require a real SwiftBeaver binary to pass
 - `bin/` - optional bundled `swiftbeaver` (v0.5.1+ unified CLI) discovered alongside the Lodge binary
-- `download-swiftbeaver.sh` - legacy helper that fetched per-GPU variant binaries; retained only for historical reference and not used by the current discovery path
+- `download-swiftbeaver.sh` - optional helper that installs one upstream SwiftBeaver release package as `bin/swiftbeaver` for the current unified discovery path
 
 ## Code Rules
 

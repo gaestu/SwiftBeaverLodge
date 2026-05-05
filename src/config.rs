@@ -190,7 +190,7 @@ impl MetadataBackend {
     }
 }
 
-/// Available file types for carving, grouped by category for the UI.
+/// Available SwiftBeaver file-type filters, grouped by category for the UI.
 ///
 /// Each tuple is `(category_name, icon, &[file_type])`. The file type strings
 /// are the exact identifiers accepted by SwiftBeaver v0.6.7's
@@ -207,7 +207,8 @@ pub const FILE_TYPES: &[(&str, &str, &[&str])] = &[
         "Documents",
         "📄",
         &[
-            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "eml",
+            "pdf", "ole", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
+            "eml",
         ],
     ),
     ("eBooks", "📚", &["epub", "mobi", "fb2", "lrf"]),
@@ -252,11 +253,26 @@ pub fn validate_flag_combinations(config: &ScanConfig) -> Vec<String> {
     if config.dry_run && config.metadata_only {
         issues.push("--dry-run and --metadata-only are mutually exclusive".to_string());
     }
+    if config.metadata_only && config.validate_carved {
+        issues.push("--metadata-only cannot be combined with --validate-carved".to_string());
+    }
     if config.remove_invalid && !config.validate_carved {
         issues.push("--remove-invalid requires --validate-carved".to_string());
     }
+    if config.metadata_only && config.remove_invalid {
+        issues.push("--metadata-only cannot be combined with --remove-invalid".to_string());
+    }
     if config.skip_duplicates && !config.dedupe {
         issues.push("--skip-duplicates requires --dedupe".to_string());
+    }
+    if config.dedupe
+        && !config.hash_algorithms.is_empty()
+        && !hash_algorithms_include_sha256(&config.hash_algorithms)
+    {
+        issues.push(
+            "--dedupe requires SHA-256 hashing; include sha256 in --hash-algorithms or leave hash algorithms unset"
+                .to_string(),
+        );
     }
     for algo in &config.hash_algorithms {
         let lower = algo.to_ascii_lowercase();
@@ -267,6 +283,10 @@ pub fn validate_flag_combinations(config: &ScanConfig) -> Vec<String> {
                 SUPPORTED_HASH_ALGORITHMS.join(", ")
             ));
         }
+    }
+
+    if config.chunk_size_mib == 0 {
+        issues.push("--chunk-size-mib must be greater than zero".to_string());
     }
 
     // Forensic safety: never allow checkpoint writes targeting evidence.
@@ -281,6 +301,12 @@ pub fn validate_flag_combinations(config: &ScanConfig) -> Vec<String> {
     }
 
     issues
+}
+
+pub(crate) fn hash_algorithms_include_sha256(hash_algorithms: &[String]) -> bool {
+    hash_algorithms
+        .iter()
+        .any(|algo| algo.eq_ignore_ascii_case("sha256"))
 }
 
 /// True if `path` looks like a Unix raw block-device path.
@@ -381,6 +407,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn zip_derived_types_cover_swiftbeaver_zip_handler_classifications() {
+        let expected = ["zip", "docx", "xlsx", "pptx"];
+        assert_eq!(ZIP_DERIVED_TYPES, expected.as_slice());
+    }
+
+    #[test]
+    fn validate_flag_combinations_rejects_dedupe_without_explicit_sha256() {
+        let config = ScanConfig {
+            dedupe: true,
+            hash_algorithms: vec!["md5".to_string()],
+            ..Default::default()
+        };
+
+        let issues = validate_flag_combinations(&config);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("--dedupe") && issue.contains("SHA-256")),
+            "expected SHA-256 dedupe issue, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn validate_flag_combinations_allows_dedupe_with_default_or_sha256_hashes() {
+        let default_hashes = ScanConfig {
+            dedupe: true,
+            hash_algorithms: Vec::new(),
+            ..Default::default()
+        };
+        assert!(validate_flag_combinations(&default_hashes).is_empty());
+
+        let explicit_sha256 = ScanConfig {
+            dedupe: true,
+            hash_algorithms: vec!["MD5".to_string(), "SHA256".to_string()],
+            ..Default::default()
+        };
+        assert!(validate_flag_combinations(&explicit_sha256).is_empty());
+    }
+
+    #[test]
+    fn validate_flag_combinations_rejects_metadata_only_validation_flags() {
+        let config = ScanConfig {
+            metadata_only: true,
+            validate_carved: true,
+            remove_invalid: true,
+            ..Default::default()
+        };
+
+        let issues = validate_flag_combinations(&config);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("--validate-carved")));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("--remove-invalid")));
+    }
+
     /// Regression test for issue #3: ensure the catalog covers all
     /// SwiftBeaver v0.6.7 carvers the issue requires us to expose.
     #[test]
@@ -398,6 +482,7 @@ mod tests {
             "ico",
             // Documents
             "pdf",
+            "ole",
             "doc",
             "docx",
             "xls",

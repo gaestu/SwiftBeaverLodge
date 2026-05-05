@@ -291,14 +291,22 @@ impl eframe::App for SwiftBeaverApp {
                     | ScanState::Completed
                     | ScanState::Failed
                     | ScanState::Cancelled => {
-                        let can_start = !self.config.input_path.is_empty()
-                            && !self.config.output_path.is_empty()
-                            && crate::config::validate_flag_combinations(&self.config).is_empty();
+                        let can_start = crate::ui::validate_config(&self.config).is_empty();
+                        let start_label = if self
+                            .config
+                            .resume_from
+                            .as_ref()
+                            .is_some_and(|path| !path.is_empty())
+                        {
+                            "▶ Resume Scan"
+                        } else {
+                            "▶ Start Scan"
+                        };
 
                         if ui
                             .add_enabled(
                                 can_start,
-                                egui::Button::new("▶ Start Scan").min_size(egui::vec2(160.0, 30.0)),
+                                egui::Button::new(start_label).min_size(egui::vec2(160.0, 30.0)),
                             )
                             .clicked()
                         {
@@ -342,9 +350,13 @@ impl eframe::App for SwiftBeaverApp {
             Tab::Monitor => {
                 self.progress_panel
                     .show(ui, state, progress.as_ref(), &logs);
+                ui.separator();
+                self.results_panel
+                    .show(ui, self.last_run_path.as_deref(), state);
             }
             Tab::Results => {
-                self.results_panel.show(ui, self.last_run_path.as_deref());
+                self.results_panel
+                    .show(ui, self.last_run_path.as_deref(), state);
             }
         });
 

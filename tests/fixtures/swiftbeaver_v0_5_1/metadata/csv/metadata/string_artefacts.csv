@@ -1,0 +1,3 @@
+run_id,artefact_kind,content,global_start,global_end,length,encoding,source
+20260428T140203Z_09e96cdf,email,case@example.test,20,37,,utf8,chunk-1
+20260428T140203Z_09e96cdf,url,https://example.test/case,48,,25,utf8,chunk-1

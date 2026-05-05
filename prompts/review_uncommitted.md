@@ -23,7 +23,7 @@ Check changed files for:
 - SwiftBeaver remains invoked through safe `Command` argument vectors.
 - No blocking process waits, large metadata loads, hashing, or filesystem scans run directly in the egui update loop.
 - Scan state transitions, cancellation, and result path handling remain correct.
-- GPU variant availability, config, UI selection, and CLI flags stay aligned.
+- SwiftBeaver discovery, release build flavor documentation, GPU config, and `--gpu` CLI behavior stay aligned.
 - Metadata backend support stays aligned across config, reader, UI, README, and tests.
 - No `.unwrap()` or `.expect()` in normal application paths without a clear reason.
 - Use `tracing`, not `println!` or `eprintln!`, outside tests or diagnostics.

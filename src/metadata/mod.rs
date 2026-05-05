@@ -1,10 +1,13 @@
-//! Metadata reading from Parquet and JSONL files
+//! Metadata reading from Parquet, JSONL, and CSV files
 
 mod reader;
 mod types;
 
 pub use reader::MetadataReader;
-pub use types::{CarvedFile, MetadataSummary, StringArtefact};
+pub use types::{
+    CarvedFile, MetadataRecord, MetadataSummary, ResultTableAvailability, RunSummary,
+    StringArtefact,
+};
 
 use std::path::Path;
 
@@ -50,12 +53,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_no_backend() {
-        let temp = TempDir::new().unwrap();
-        assert_eq!(detect_metadata_backend(temp.path()), None);
-    }
-
-    #[test]
     fn test_detect_csv_backend() {
         let temp = TempDir::new().unwrap();
         let metadata_dir = temp.path().join("metadata");
@@ -63,5 +60,11 @@ mod tests {
         fs::write(metadata_dir.join("carved_files.csv"), "").unwrap();
 
         assert_eq!(detect_metadata_backend(temp.path()), Some("csv"));
+    }
+
+    #[test]
+    fn test_detect_no_backend() {
+        let temp = TempDir::new().unwrap();
+        assert_eq!(detect_metadata_backend(temp.path()), None);
     }
 }

@@ -2,14 +2,17 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 
 use super::{discover_swiftbeaver, progress::parse_json_log, LogEntry, ScanProgress, ScanState};
 use crate::config::ScanConfig;
+
+const CANCEL_GRACE_PERIOD: Duration = Duration::from_secs(15);
 
 /// Messages from scan thread to UI
 #[derive(Debug, Clone)]
@@ -149,6 +152,22 @@ impl ScanManager {
             bail!("Input file does not exist: {}", config.input_path);
         }
 
+        if let Some(path) = config.resume_from.as_ref().filter(|p| !p.is_empty()) {
+            let resume_path = PathBuf::from(path);
+            if !resume_path.is_file() {
+                bail!("Resume checkpoint file does not exist");
+            }
+        }
+
+        if let Some(path) = config.checkpoint_path.as_ref().filter(|p| !p.is_empty()) {
+            let checkpoint_path = PathBuf::from(path);
+            if let Some(parent) = checkpoint_path.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    bail!("Checkpoint directory does not exist");
+                }
+            }
+        }
+
         std::fs::create_dir_all(&config.output_path)
             .context("Failed to create output directory")?;
 
@@ -167,6 +186,10 @@ impl ScanManager {
         self.cancel_tx = Some(cancel_tx);
 
         // Build command arguments
+        let checkpoint_configured = config
+            .checkpoint_path
+            .as_ref()
+            .is_some_and(|path| !path.is_empty());
         let args = build_cli_args(&config);
 
         self.logs.push(LogEntry {
@@ -177,7 +200,7 @@ impl ScanManager {
 
         // Spawn scan thread (non-blocking!)
         std::thread::spawn(move || {
-            run_scan_thread(args, message_tx, cancel_rx);
+            run_scan_thread(args, checkpoint_configured, message_tx, cancel_rx);
         });
 
         Ok(())
@@ -205,7 +228,12 @@ impl Default for ScanManager {
 }
 
 /// Run the scan in a background thread - completely non-blocking to UI
-fn run_scan_thread(args: Vec<String>, message_tx: Sender<ScanMessage>, cancel_rx: Receiver<()>) {
+fn run_scan_thread(
+    args: Vec<String>,
+    checkpoint_configured: bool,
+    message_tx: Sender<ScanMessage>,
+    cancel_rx: Receiver<()>,
+) {
     let discovered = match discover_swiftbeaver().with_context(|| {
         "swiftbeaver binary not found. Install SwiftBeaver v0.6.7+ on PATH, \
          or place the `swiftbeaver` binary in <exe_dir>/bin/ or ./bin/."
@@ -263,6 +291,7 @@ fn run_scan_thread(args: Vec<String>, message_tx: Sender<ScanMessage>, cancel_rx
     let stdout = match child.stdout.take() {
         Some(s) => s,
         None => {
+            let _ = child.kill();
             let _ = message_tx.send(ScanMessage::Error("Failed to capture stdout".to_string()));
             let _ = message_tx.send(ScanMessage::StateChange(ScanState::Failed));
             return;
@@ -272,53 +301,72 @@ fn run_scan_thread(args: Vec<String>, message_tx: Sender<ScanMessage>, cancel_rx
     let stderr = match child.stderr.take() {
         Some(s) => s,
         None => {
+            let _ = child.kill();
             let _ = message_tx.send(ScanMessage::Error("Failed to capture stderr".to_string()));
             let _ = message_tx.send(ScanMessage::StateChange(ScanState::Failed));
             return;
         }
     };
 
-    let stdout_reader = BufReader::new(stdout);
-    let stderr_reader = BufReader::new(stderr);
+    let (line_tx, line_rx) = channel::<(String, &'static str)>();
 
-    // Clone for stderr thread
-    let message_tx_stderr = message_tx.clone();
+    let stdout_handle = spawn_stream_reader(stdout, line_tx.clone(), "INFO");
+    let stderr_handle = spawn_stream_reader(stderr, line_tx, "STDERR");
 
-    // Spawn stderr reader thread. SwiftBeaver normally writes JSON logs to
-    // stdout, but parsing structured events from stderr too keeps Lodge robust
-    // against future stream-routing changes and external redirection.
-    let stderr_handle = std::thread::spawn(move || {
-        for line in stderr_reader.lines().map_while(Result::ok) {
-            dispatch_log_line(&line, &message_tx_stderr, "STDERR");
-        }
-    });
-
-    // Process stdout on this thread
     let mut cancelled = false;
-    for line in stdout_reader.lines().map_while(Result::ok) {
-        // Check for cancel request (non-blocking)
-        if cancel_rx.try_recv().is_ok() {
+    let mut cancel_requested_at: Option<Instant> = None;
+    let mut forced_kill_sent = false;
+    let status = loop {
+        drain_log_lines(&line_rx, &message_tx);
+
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Err(err) => break Err(err),
+            Ok(None) => {}
+        }
+
+        if !cancelled && cancel_rx.try_recv().is_ok() {
             cancelled = true;
-            // Kill the process
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
+            cancel_requested_at = Some(Instant::now());
+            let detail = if checkpoint_configured {
+                "Cancellation requested; asking SwiftBeaver to stop so it can write checkpoint state"
+            } else {
+                "Cancellation requested; asking SwiftBeaver to stop"
+            };
+            let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                timestamp: Utc::now().to_rfc3339(),
+                level: "INFO".to_string(),
+                message: detail.to_string(),
+            }));
+            if let Err(err) = request_graceful_termination(&mut child, pid) {
+                let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                    timestamp: Utc::now().to_rfc3339(),
+                    level: "WARN".to_string(),
+                    message: format!("Failed to request graceful stop: {err}"),
+                }));
             }
-            #[cfg(not(unix))]
-            {
+        }
+
+        if let Some(started) = cancel_requested_at {
+            if !forced_kill_sent && started.elapsed() >= CANCEL_GRACE_PERIOD {
+                forced_kill_sent = true;
+                let _ = message_tx.send(ScanMessage::Log(LogEntry {
+                    timestamp: Utc::now().to_rfc3339(),
+                    level: "WARN".to_string(),
+                    message:
+                        "SwiftBeaver did not stop after cancellation grace period; forcing exit"
+                            .to_string(),
+                }));
                 let _ = child.kill();
             }
-            break;
         }
 
-        dispatch_log_line(&line, &message_tx, "INFO");
-    }
+        std::thread::sleep(Duration::from_millis(50));
+    };
 
-    // Wait for stderr thread
+    let _ = stdout_handle.join();
     let _ = stderr_handle.join();
-
-    // Wait for process to finish
-    let status = child.wait();
+    drain_log_lines(&line_rx, &message_tx);
 
     // Determine final state and send it
     let final_state = if cancelled {
@@ -358,6 +406,46 @@ fn run_scan_thread(args: Vec<String>, message_tx: Sender<ScanMessage>, cancel_rx
     };
 
     let _ = message_tx.send(ScanMessage::StateChange(final_state));
+}
+
+fn spawn_stream_reader<R: std::io::Read + Send + 'static>(
+    stream: R,
+    line_tx: Sender<(String, &'static str)>,
+    default_level: &'static str,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stream);
+        for line in reader.lines().map_while(std::result::Result::ok) {
+            if line_tx.send((line, default_level)).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+fn drain_log_lines(line_rx: &Receiver<(String, &'static str)>, message_tx: &Sender<ScanMessage>) {
+    while let Ok((line, default_level)) = line_rx.try_recv() {
+        dispatch_log_line(&line, message_tx, default_level);
+    }
+}
+
+fn request_graceful_termination(_child: &mut Child, pid: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        // SwiftBeaver installs a Ctrl-C handler; SIGINT matches that graceful
+        // interruption path more closely than unconditional termination.
+        let result = unsafe { libc::kill(pid as i32, libc::SIGINT) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        _child.kill()
+    }
 }
 
 /// Parse a single log line from SwiftBeaver and forward it as one or more
@@ -554,7 +642,10 @@ fn build_cli_args(config: &ScanConfig) -> Vec<String> {
         args.push(config.write_workers.to_string());
     }
 
-    // Chunk overlap (chunk_size_mib uses SwiftBeaver's default unless set explicitly elsewhere)
+    // Emit chunk size explicitly so every launched scan is self-describing,
+    // including future resumes if SwiftBeaver's default ever changes.
+    args.push("--chunk-size-mib".to_string());
+    args.push(config.chunk_size_mib.to_string());
     if let Some(overlap) = config.overlap_kib {
         args.push("--overlap-kib".to_string());
         args.push(overlap.to_string());
@@ -623,13 +714,27 @@ mod tests {
 
         let args = build_cli_args(&config);
 
-        assert!(args.contains(&"--input".to_string()));
-        assert!(args.contains(&"/tmp/test.dd".to_string()));
-        assert!(args.contains(&"--output".to_string()));
-        assert!(args.contains(&"--log-format".to_string()));
-        assert!(args.contains(&"json".to_string()));
-        assert!(args.contains(&"--metadata-backend".to_string()));
-        assert!(args.contains(&"parquet".to_string()));
+        assert_eq!(
+            args,
+            vec![
+                "--input",
+                "/tmp/test.dd",
+                "--output",
+                "/tmp/output",
+                "--log-format",
+                "json",
+                "--progress-interval-secs",
+                "1",
+                "--metadata-backend",
+                "parquet",
+                "--types",
+                "jpeg,png,gif,webp,bmp,tiff,pdf,zip,sqlite,docx,xlsx,pptx,mp4",
+                "--scan-strings",
+                "--compute-evidence-sha256",
+                "--chunk-size-mib",
+                "64",
+            ]
+        );
     }
 
     #[test]
@@ -666,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cli_args_default_does_not_emit_optional_flags() {
+    fn test_build_cli_args_default_emits_chunk_size_but_no_optional_flags() {
         let config = ScanConfig {
             input_path: "/tmp/test.dd".to_string(),
             output_path: "/tmp/output".to_string(),
@@ -704,6 +809,7 @@ mod tests {
                 "default args unexpectedly contain {flag}: {args:?}"
             );
         }
+        assert_eq!(flag_value(&args, "--chunk-size-mib"), Some("64"));
     }
 
     #[test]
@@ -712,23 +818,35 @@ mod tests {
             input_path: "/evidence/disk.dd".to_string(),
             output_path: "/out".to_string(),
             config_path: Some("/etc/swiftbeaver.yaml".to_string()),
+            file_types: vec!["jpeg".to_string(), "sqlite_page".to_string()],
+            disable_zip: true,
+            scan_urls: false,
+            scan_emails: false,
+            scan_phones: false,
+            scan_utf16: true,
+            gpu_enabled: true,
+            metadata_backend: crate::config::MetadataBackend::Csv,
             evidence_sha256: Some("deadbeef".to_string()),
             scan_workers: 4,
             carve_workers: 8,
             write_workers: 2,
             workers: 16,
+            chunk_size_mib: 128,
             overlap_kib: Some(128),
             string_min_len: 12,
             scan_entropy: true,
             entropy_window_bytes: Some(4096),
             entropy_threshold: 6.5,
+            max_bytes: Some(1_048_576),
             max_chunks: Some(10),
+            max_files: Some(100),
+            max_memory_mib: Some(512),
             max_open_files: Some(2048),
             checkpoint_path: Some("/var/tmp/run.ckpt".to_string()),
             resume_from: Some("/var/tmp/run.ckpt".to_string()),
             dry_run: false,
-            metadata_only: true,
             scan_bitlocker_recovery: false,
+            metadata_only: false,
             validate_carved: true,
             remove_invalid: true,
             hash_algorithms: vec!["md5".to_string(), "sha256".to_string()],
@@ -740,8 +858,73 @@ mod tests {
         let args = build_cli_args(&config);
 
         assert_eq!(
-            flag_value(&args, "--config-path"),
-            Some("/etc/swiftbeaver.yaml")
+            args,
+            vec![
+                "--input",
+                "/evidence/disk.dd",
+                "--output",
+                "/out",
+                "--log-format",
+                "json",
+                "--progress-interval-secs",
+                "1",
+                "--metadata-backend",
+                "csv",
+                "--config-path",
+                "/etc/swiftbeaver.yaml",
+                "--types",
+                "jpeg,sqlite_page",
+                "--disable-zip",
+                "--scan-strings",
+                "--scan-utf16",
+                "--no-scan-urls",
+                "--no-scan-emails",
+                "--no-scan-phones",
+                "--no-scan-bitlocker-recovery",
+                "--string-min-len",
+                "12",
+                "--scan-entropy",
+                "--entropy-window-bytes",
+                "4096",
+                "--entropy-threshold",
+                "6.5",
+                "--gpu",
+                "--compute-evidence-sha256",
+                "--evidence-sha256",
+                "deadbeef",
+                "--max-bytes",
+                "1048576",
+                "--max-chunks",
+                "10",
+                "--max-files",
+                "100",
+                "--max-memory-mib",
+                "512",
+                "--max-open-files",
+                "2048",
+                "--workers",
+                "16",
+                "--scan-workers",
+                "4",
+                "--carve-workers",
+                "8",
+                "--write-workers",
+                "2",
+                "--chunk-size-mib",
+                "128",
+                "--overlap-kib",
+                "128",
+                "--validate-carved",
+                "--remove-invalid",
+                "--hash-algorithms",
+                "md5,sha256",
+                "--dedupe",
+                "--skip-duplicates",
+                "--checkpoint-path",
+                "/var/tmp/run.ckpt",
+                "--resume-from",
+                "/var/tmp/run.ckpt",
+            ]
         );
         assert_eq!(flag_value(&args, "--evidence-sha256"), Some("deadbeef"));
         assert_eq!(flag_value(&args, "--workers"), Some("16"));
@@ -763,7 +946,7 @@ mod tests {
             flag_value(&args, "--resume-from"),
             Some("/var/tmp/run.ckpt")
         );
-        assert!(args.iter().any(|a| a == "--metadata-only"));
+        assert!(!args.iter().any(|a| a == "--metadata-only"));
         assert!(!args.iter().any(|a| a == "--dry-run"));
         assert!(args.iter().any(|a| a == "--no-scan-bitlocker-recovery"));
         assert!(args.iter().any(|a| a == "--validate-carved"));
@@ -799,6 +982,61 @@ mod tests {
     }
 
     #[test]
+    fn test_build_cli_args_checkpoint_mode_includes_chunk_geometry() {
+        let config = ScanConfig {
+            input_path: "/tmp/test.dd".to_string(),
+            output_path: "/tmp/output".to_string(),
+            checkpoint_path: Some("/tmp/run.ckpt".to_string()),
+            chunk_size_mib: 256,
+            overlap_kib: Some(96),
+            ..Default::default()
+        };
+
+        let args = build_cli_args(&config);
+
+        assert_eq!(
+            flag_value(&args, "--checkpoint-path"),
+            Some("/tmp/run.ckpt")
+        );
+        assert_eq!(flag_value(&args, "--chunk-size-mib"), Some("256"));
+        assert_eq!(flag_value(&args, "--overlap-kib"), Some("96"));
+        assert_eq!(flag_value(&args, "--resume-from"), None);
+    }
+
+    #[test]
+    fn test_build_cli_args_resume_mode_includes_chunk_geometry() {
+        let config = ScanConfig {
+            input_path: "/tmp/test.dd".to_string(),
+            output_path: "/tmp/output".to_string(),
+            resume_from: Some("/tmp/run.ckpt".to_string()),
+            chunk_size_mib: 128,
+            overlap_kib: Some(32),
+            ..Default::default()
+        };
+
+        let args = build_cli_args(&config);
+
+        assert_eq!(flag_value(&args, "--resume-from"), Some("/tmp/run.ckpt"));
+        assert_eq!(flag_value(&args, "--chunk-size-mib"), Some("128"));
+        assert_eq!(flag_value(&args, "--overlap-kib"), Some("32"));
+        assert_eq!(flag_value(&args, "--checkpoint-path"), None);
+    }
+
+    #[test]
+    fn test_build_cli_args_resume_mode_emits_default_chunk_size() {
+        let config = ScanConfig {
+            input_path: "/tmp/test.dd".to_string(),
+            output_path: "/tmp/output".to_string(),
+            resume_from: Some("/tmp/run.ckpt".to_string()),
+            ..Default::default()
+        };
+
+        let args = build_cli_args(&config);
+
+        assert_eq!(flag_value(&args, "--chunk-size-mib"), Some("64"));
+    }
+
+    #[test]
     fn test_build_cli_args_entropy_window_only_when_scan_entropy_enabled() {
         let config = ScanConfig {
             input_path: "/tmp/x".to_string(),
@@ -813,6 +1051,21 @@ mod tests {
     }
 
     #[test]
+    fn test_build_cli_args_metadata_only_mode() {
+        let config = ScanConfig {
+            input_path: "/tmp/x".to_string(),
+            output_path: "/tmp/o".to_string(),
+            metadata_only: true,
+            ..Default::default()
+        };
+        let args = build_cli_args(&config);
+
+        assert!(args.iter().any(|a| a == "--metadata-only"));
+        assert!(!args.iter().any(|a| a == "--validate-carved"));
+        assert!(!args.iter().any(|a| a == "--remove-invalid"));
+    }
+
+    #[test]
     fn test_validate_flag_combinations_detects_invalid_pairs() {
         use crate::config::validate_flag_combinations;
 
@@ -824,6 +1077,7 @@ mod tests {
             dedupe: false,
             skip_duplicates: true,
             hash_algorithms: vec!["sha1".to_string()],
+            chunk_size_mib: 0,
             ..Default::default()
         };
 
@@ -834,6 +1088,7 @@ mod tests {
         assert!(issues.iter().any(|i| i.contains("--remove-invalid")));
         assert!(issues.iter().any(|i| i.contains("--skip-duplicates")));
         assert!(issues.iter().any(|i| i.contains("sha1")));
+        assert!(issues.iter().any(|i| i.contains("--chunk-size-mib")));
     }
 
     #[test]
@@ -842,7 +1097,7 @@ mod tests {
 
         let config = ScanConfig {
             dry_run: false,
-            metadata_only: true,
+            metadata_only: false,
             validate_carved: true,
             remove_invalid: true,
             dedupe: true,
@@ -917,6 +1172,52 @@ mod tests {
         let msg = format!("{err}");
         assert!(
             msg.contains("Invalid scan configuration") && msg.contains("raw block device"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(manager.state(), ScanState::Idle);
+    }
+
+    #[test]
+    fn test_start_rejects_missing_resume_checkpoint_before_spawning() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_checkpoint = temp.path().join("missing.ckpt");
+        let mut manager = ScanManager::new();
+        let config = ScanConfig {
+            input_path: "/tmp".to_string(),
+            output_path: temp.path().join("out").display().to_string(),
+            resume_from: Some(missing_checkpoint.display().to_string()),
+            ..Default::default()
+        };
+
+        let err = manager
+            .start(config)
+            .expect_err("start() must reject missing resume checkpoints");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Resume checkpoint file does not exist"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(manager.state(), ScanState::Idle);
+    }
+
+    #[test]
+    fn test_start_rejects_missing_checkpoint_parent_before_spawning() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = temp.path().join("missing-dir").join("run.ckpt");
+        let mut manager = ScanManager::new();
+        let config = ScanConfig {
+            input_path: "/tmp".to_string(),
+            output_path: temp.path().join("out").display().to_string(),
+            checkpoint_path: Some(checkpoint.display().to_string()),
+            ..Default::default()
+        };
+
+        let err = manager
+            .start(config)
+            .expect_err("start() must reject missing checkpoint parent directories");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Checkpoint directory does not exist"),
             "unexpected error: {msg}"
         );
         assert_eq!(manager.state(), ScanState::Idle);
