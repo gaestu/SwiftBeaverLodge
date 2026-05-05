@@ -32,7 +32,7 @@ usage() {
         "  ./install.sh" \
         "  LODGE_VERSION=v0.1.0 ./install.sh" \
         "  INSTALL_DIR=\"\$HOME/.local/bin\" ./install.sh" \
-        "  SWIFTBEAVER_VERSION=v0.5.1 SWIFTBEAVER_FLAVOR=opencl ./install.sh"
+        "  SWIFTBEAVER_VERSION=v0.6.7 SWIFTBEAVER_FLAVOR=opencl ./install.sh"
 }
 
 case "${1:-}" in

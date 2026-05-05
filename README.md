@@ -57,7 +57,7 @@ The installer downloads the bundled release, installs `swiftbeaverlodge` and
 SwiftBeaver discovery path. Set `LODGE_VERSION=v0.1.0` to install a specific
 release, or `INSTALL_DIR=/custom/bin` to choose the install location. Advanced
 users can replace the bundled engine during install with
-`SWIFTBEAVER_VERSION=v0.5.1 SWIFTBEAVER_FLAVOR=opencl ./install.sh`.
+`SWIFTBEAVER_VERSION=v0.6.7 SWIFTBEAVER_FLAVOR=opencl ./install.sh`.
 Set `EXPOSE_SWIFTBEAVER=1` to also expose `swiftbeaver` directly in
 `INSTALL_DIR`; existing files at that path are left untouched.
 
@@ -331,7 +331,7 @@ cargo test
 # Run with output
 cargo test -- --nocapture
 
-# Optional installed/bundled SwiftBeaver smoke test (requires v0.5.1+)
+# Optional installed/bundled SwiftBeaver smoke test (requires v0.6.7+)
 cargo test --test installed_swiftbeaver_smoke -- --ignored --nocapture
 ```
 

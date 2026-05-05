@@ -5,7 +5,7 @@ edition = "2021"
 description = "GUI Frontend for SwiftBeaver Forensic File Carver"
 authors = ["SwiftBeaverLodge Team"]
 license = "Apache-2.0"
-repository = "https://github.com/yourusername/SwiftBeaverLodge"
+repository = "https://github.com/gaestu/SwiftBeaverLodge"
 
 [lib]
 name = "swiftbeaverlodge"

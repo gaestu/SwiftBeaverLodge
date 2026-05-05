@@ -2,12 +2,12 @@
 # Convenience installer for the SwiftBeaver CLI used by SwiftBeaverLodge.
 #
 # SwiftBeaverLodge discovers a single executable named `swiftbeaver`. Upstream
-# SwiftBeaver v0.5.1 release archives are still packaged by build flavor, but
+# SwiftBeaver release archives are packaged by build flavor, but
 # this helper installs the chosen archive as ./bin/swiftbeaver.
 
 set -euo pipefail
 
-VERSION="${SWIFTBEAVER_VERSION:-v0.5.1}"
+VERSION="${SWIFTBEAVER_VERSION:-v0.6.7}"
 FLAVOR="${1:-cpu-only}"
 REPO="gaestu/SwiftBeaver"
 
@@ -19,10 +19,10 @@ Downloads SwiftBeaver ${VERSION} for Linux x86_64 and installs it as:
   ./bin/swiftbeaver
 
 Environment:
-  SWIFTBEAVER_VERSION   Release tag to download (default: v0.5.1)
+  SWIFTBEAVER_VERSION   Release tag to download (default: v0.6.7)
 
 Notes:
-  SwiftBeaverLodge requires swiftbeaver v0.5.1+ and only discovers a binary
+  SwiftBeaverLodge requires swiftbeaver v0.6.7+ and only discovers a binary
   named "swiftbeaver". GPU acceleration is enabled in Lodge with SwiftBeaver's
   --gpu flag; Lodge no longer selects swiftbeaver-<flavor> binaries.
 USAGE
@@ -51,7 +51,7 @@ case "${OS}" in
         ;;
     *)
         echo "No ${VERSION} prebuilt SwiftBeaver artifact is documented for OS: ${OS}" >&2
-        echo "Install swiftbeaver v0.5.1+ on PATH manually, or place it at ./bin/swiftbeaver." >&2
+        echo "Install swiftbeaver v0.6.7+ on PATH manually, or place it at ./bin/swiftbeaver." >&2
         exit 1
         ;;
 esac
@@ -62,7 +62,7 @@ case "${ARCH}" in
         ;;
     *)
         echo "No ${VERSION} prebuilt SwiftBeaver artifact is documented for architecture: ${ARCH}" >&2
-        echo "Install swiftbeaver v0.5.1+ on PATH manually, or place it at ./bin/swiftbeaver." >&2
+        echo "Install swiftbeaver v0.6.7+ on PATH manually, or place it at ./bin/swiftbeaver." >&2
         exit 1
         ;;
 esac

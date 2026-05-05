@@ -12,10 +12,10 @@ use tempfile::TempDir;
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[test]
-#[ignore = "requires SwiftBeaver v0.5.1+; run with `cargo test --test installed_swiftbeaver_smoke -- --ignored --nocapture`"]
+#[ignore = "requires SwiftBeaver v0.6.7+; run with `cargo test --test installed_swiftbeaver_smoke -- --ignored --nocapture`"]
 fn installed_swiftbeaver_minimal_scan_loads_metadata() -> Result<()> {
     let discovered = discover_swiftbeaver().context(
-        "missing binary: install SwiftBeaver v0.5.1+ on PATH, or place `swiftbeaver` in ./bin",
+        "missing binary: install SwiftBeaver v0.6.7+ on PATH, or place `swiftbeaver` in ./bin",
     )?;
     discovered.check_compatibility().map_err(|issue| {
         anyhow::anyhow!("wrong or unparseable version: {}", issue.user_message())

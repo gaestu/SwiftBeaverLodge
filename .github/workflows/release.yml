@@ -19,7 +19,7 @@ permissions:
   contents: write
 
 env:
-  MIN_SWIFTBEAVER_VERSION: "0.5.1"
+  MIN_SWIFTBEAVER_VERSION: "0.6.7"
   SWIFTBEAVER_REPO: gaestu/SwiftBeaver
   SWIFTBEAVER_FLAVOR: cpu-only
   SWIFTBEAVER_ASSET: swiftbeaver-linux-x86_64-cpu-only.tar.gz
