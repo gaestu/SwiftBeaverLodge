@@ -251,7 +251,7 @@ SwiftBeaverLodge/
 | String Scanning | Extract URLs/emails/phones and BitLocker recovery passwords | enabled |
 | GPU Acceleration | Use GPU for faster scanning (`--gpu`) | disabled |
 | SwiftBeaver YAML Config | Pass an expert SwiftBeaver YAML file with `--config-path` | disabled |
-| Evidence Hash | Compute SHA-256 of evidence | enabled |
+| Evidence Hash | Compute SHA-256 of evidence | disabled |
 | Chunking | Chunk size and optional overlap | 64 MiB, SwiftBeaver default overlap |
 | Checkpoint / Resume | Write checkpoint state on early exit or resume from an existing checkpoint | disabled |
 | Run Mode | Normal, dry-run, or metadata-only scanning | normal |
@@ -369,7 +369,7 @@ Apache License 2.0 - see [LICENSE](LICENSE) for details.
 **Important for forensic use:**
 
 - This tool operates in **read-only mode** on evidence
-- SHA-256 hashes are computed for verification
+- SHA-256 hashes can be computed for verification when enabled
 - All operations are logged for audit trails
 - Evidence paths are never modified
 

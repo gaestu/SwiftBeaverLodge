@@ -730,7 +730,6 @@ mod tests {
                 "--types",
                 "jpeg,png,gif,webp,bmp,tiff,pdf,zip,sqlite,docx,xlsx,pptx,mp4",
                 "--scan-strings",
-                "--compute-evidence-sha256",
                 "--chunk-size-mib",
                 "64",
             ]
@@ -810,6 +809,7 @@ mod tests {
             );
         }
         assert_eq!(flag_value(&args, "--chunk-size-mib"), Some("64"));
+        assert!(!args.iter().any(|a| a == "--compute-evidence-sha256"));
     }
 
     #[test]
@@ -826,6 +826,7 @@ mod tests {
             scan_utf16: true,
             gpu_enabled: true,
             metadata_backend: crate::config::MetadataBackend::Csv,
+            compute_evidence_hash: true,
             evidence_sha256: Some("deadbeef".to_string()),
             scan_workers: 4,
             carve_workers: 8,

@@ -112,7 +112,7 @@ impl Default for ScanConfig {
         Self {
             input_path: String::new(),
             output_path: String::new(),
-            compute_evidence_hash: true,
+            compute_evidence_hash: false,
             evidence_sha256: None,
             config_path: None,
             file_types: vec![
@@ -338,7 +338,7 @@ mod tests {
     fn test_default_config() {
         let config = ScanConfig::default();
         assert!(config.scan_strings);
-        assert!(config.compute_evidence_hash);
+        assert!(!config.compute_evidence_hash);
         assert_eq!(config.metadata_backend, MetadataBackend::Parquet);
         assert!(!config.file_types.is_empty());
     }
